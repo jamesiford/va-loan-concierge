@@ -13,6 +13,9 @@ azure-identity>=1.25.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.29.0
 
+# ── HTTP (ARM management API calls for connection provisioning) ───────────────
+requests>=2.32.0
+
 # ── Environment management ────────────────────────────────────────────────────
 python-dotenv>=1.0.0
 

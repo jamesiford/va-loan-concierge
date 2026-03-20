@@ -501,3 +501,86 @@ va-loan-concierge-ui.jsx
 - Tailwind classes only — no inline styles, no CSS modules, no styled-components
 - The Vite dev proxy in `vite.config.js` should forward `/api` to `http://localhost:8000`
   so the UI and backend can run on separate ports in development
+
+---
+
+## Current Status / Planned Upgrades
+
+The end-to-end demo is working. Both agents run, SSE events stream to the UI in real time,
+and the final response renders correctly with real KB grounding and citations.
+
+---
+
+### 1. Foundry IQ Knowledge Base (replacing FileSearch) — ✅ COMPLETE
+
+**Implemented state:**
+`AdvisorAgent` connects to an Azure AI Search Knowledge Base created in the Foundry portal
+via the MCP protocol, using a `RemoteTool` project connection with `ProjectManagedIdentity`
+auth. The agent is registered with `MCPTool` (not `FileSearchTool` or `AzureAISearchTool`).
+
+**How it works:**
+- `initialize()` PUTs a `RemoteTool` project connection via ARM pointing at
+  `{AZURE_AI_SEARCH_ENDPOINT}/knowledgebases/{KNOWLEDGE_BASE_NAME}/mcp?api-version=2025-11-01-preview`
+- The agent is registered with `MCPTool(server_label="knowledge-base", allowed_tools=["knowledge_base_retrieve"], project_connection_id=MCP_CONNECTION_NAME)`
+- After the Responses API call, `response.output` contains `url_citation` annotations on
+  the message item; `_extract_citations()` extracts filenames from blob URLs and emits them
+  as `advisor_source` SSE events
+- `_replace_citation_labels()` rewrites `【idx†source】` markers in the response text to
+  `【idx†va_guidelines.md】` etc. using annotation positions
+
+**Required env vars:**
+- `KNOWLEDGE_BASE_NAME` — KB name in Azure AI Search (e.g. `kb-va-loan-guidelines`)
+- `AZURE_AI_SEARCH_ENDPOINT` — search service URL (e.g. `https://search-va-loan-demo.search.windows.net`)
+- `PROJECT_RESOURCE_ID` — ARM resource ID of the Foundry project
+- `MCP_CONNECTION_NAME` — name for the RemoteTool connection (e.g. `kb-va-loan-demo-mcp`)
+
+**Required Azure RBAC (on the Azure AI Search service):**
+- `Search Index Data Reader` → Foundry project's managed identity
+- `Cognitive Services OpenAI User` → Search service's managed identity (on the Azure OpenAI resource)
+- Auth mode on the search service must be `aadOrApiKey` (not `apiKeyOnly`)
+
+**Reference:** https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/foundry-iq-connect
+
+---
+
+### 2. Azure-Hosted MCP Server (replacing FunctionTool)
+
+**Current state:**
+`ActionAgent` registers `refi_savings_calculator` and `appointment_scheduler` as
+`FunctionTool` entries in the `PromptAgentDefinition`. The tools are executed client-side
+in Python (inside `_execute_tool_call()`), with their results fed back to the agent via
+an explicit conversation history loop. The `/tools/` Python files are local simulations —
+no network calls are made.
+
+**Target state:**
+The two tools are implemented as an Azure Function App that exposes an MCP-compliant HTTP
+endpoint. The Function App is deployed and managed separately (by the user). `ActionAgent`
+connects to it via the Foundry SDK's MCP client rather than via `FunctionTool`. Tool
+execution happens server-side in the Function App; the agent invokes tools over the MCP
+protocol and receives structured results back.
+
+**Connection approach:**
+Use `McpTool` from `azure-ai-projects` with `StreamableHTTPServerParams` pointing to the
+Function App's MCP endpoint URL. The endpoint URL is stored in the `MCP_ENDPOINT`
+environment variable (already in `.env.example`). If the Function App requires
+authentication (e.g., Azure AD or a function key), this must be configured in the
+`StreamableHTTPServerParams` headers.
+
+**Implementation notes for Claude Code:**
+- Replace `FunctionTool` registrations in `ActionAgent.initialize()` with a single
+  `McpTool` referencing the `MCP_ENDPOINT` env var
+- Remove the client-side `_execute_tool_call()`, `_refi_event_inputs()`,
+  `_appt_event_inputs()`, and `_build_prompt()` helpers — tool execution is now
+  handled by the MCP server; the agent run loop no longer needs to intercept and
+  re-submit tool calls
+- The `run()` method simplifies to a single Responses API call (no tool call loop),
+  since MCP tool execution is handled transparently by the Foundry runtime
+- SSE event emission for `action_tool_call` and `action_tool_result` must be
+  reconsidered: if the Foundry runtime handles MCP calls opaquely, these events may
+  need to come from response metadata rather than from an intercepted tool call loop —
+  confirm what the Responses API returns for MCP tool invocations before implementing
+- The local `/tools/refi_calculator.py` and `/tools/appointment_scheduler.py` files
+  become the reference implementation for the Function App, but are no longer imported
+  by `action_agent.py`
+- Update `requirements.txt` if new MCP-specific SDK dependencies are needed
+- Update the mock stream in `useAgentStream.js` if the event structure changes

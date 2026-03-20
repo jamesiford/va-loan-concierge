@@ -180,7 +180,12 @@ class TestOrchestratorRun:
         assert types.index("complete") < types.index("final_response")
 
     async def test_advisor_source_events_for_eligibility_query(self):
-        orch = _make_orchestrator_with_mocks()
+        # advisor_source events now originate from the advisor agent itself.
+        advisor_events = (
+            {"type": "advisor_source", "message": "Searching: kb-va-loan-product-guidelines"},
+            {"type": "_advisor_text", "text": "You are eligible."},
+        )
+        orch = _make_orchestrator_with_mocks(advisor_events=advisor_events)
         events = await collect_events(orch, "Am I eligible for an IRRRL?")
         source_events = [e for e in events if e["type"] == "advisor_source"]
         assert len(source_events) >= 1

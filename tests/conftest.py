@@ -12,6 +12,10 @@ from azure.core.exceptions import ResourceNotFoundError
 # Ensure required env vars exist before any module-level imports trigger them.
 os.environ.setdefault("PROJECT_ENDPOINT", "https://test.foundry.azure.com")
 os.environ.setdefault("MODEL_DEPLOYMENT_NAME", "gpt-4o-test")
+os.environ.setdefault("KNOWLEDGE_BASE_NAME", "kb-va-loan-test")
+os.environ.setdefault("AZURE_AI_SEARCH_ENDPOINT", "https://test-search.search.windows.net")
+os.environ.setdefault("PROJECT_RESOURCE_ID", "/subscriptions/00000000/resourceGroups/rg-test/providers/Microsoft.CognitiveServices/accounts/test/projects/test-proj")
+os.environ.setdefault("MCP_CONNECTION_NAME", "kb-va-loan-test-mcp")
 
 
 # ---------------------------------------------------------------------------
@@ -38,16 +42,15 @@ class AsyncList:
 
 def make_advisor_mock_client(
     response_text: str = "IRRRL eligibility confirmed. [Source: VA Guidelines]",
-) -> tuple[MagicMock, MagicMock]:
+) -> MagicMock:
     """
-    Build mock (project_client, agents_client) for AdvisorAgent.
+    Build a mock AIProjectClient for AdvisorAgent.
 
-    project_client — AIProjectClient mock (agent registration + Responses API)
-    agents_client  — AgentsClient mock (vector store / file operations)
+    The agent now references an externally-managed Azure AI Search Knowledge Base;
+    no vector store or file upload operations occur at runtime.
 
-    Default: no existing agents or vector stores → triggers full creation path.
+    Default: no existing agent → triggers create_version path.
     """
-    # ── AIProjectClient mock ───────────────────────────────────────────────
     project_client = MagicMock()
 
     # agents.get raises ResourceNotFoundError (no existing agent to reuse).
@@ -60,7 +63,7 @@ def make_advisor_mock_client(
     version_obj.version = "1"
     project_client.agents.create_version = AsyncMock(return_value=version_obj)
 
-    # Responses API — returns a simple text response (no tool calls).
+    # Responses API — returns a simple text response with no citations.
     openai_client = MagicMock()
     response = MagicMock()
     response.output = []
@@ -68,24 +71,7 @@ def make_advisor_mock_client(
     openai_client.responses.create = AsyncMock(return_value=response)
     project_client.get_openai_client = MagicMock(return_value=openai_client)
 
-    # ── AgentsClient mock ──────────────────────────────────────────────────
-    agents_client = MagicMock()
-
-    # Listing returns empty (no existing vector stores).
-    agents_client.vector_stores.list.return_value = AsyncList()
-
-    # File upload.
-    uploaded_file = MagicMock()
-    uploaded_file.id = "file-001"
-    agents_client.files.upload_and_poll = AsyncMock(return_value=uploaded_file)
-
-    # Vector store creation.
-    vs = MagicMock()
-    vs.id = "vs-001"
-    vs.name = "VA Knowledge Base"
-    agents_client.vector_stores.create_and_poll = AsyncMock(return_value=vs)
-
-    return project_client, agents_client
+    return project_client
 
 
 def make_action_mock_client(

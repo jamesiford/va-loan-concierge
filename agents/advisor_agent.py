@@ -1,140 +1,101 @@
 """
-VA Loan Advisor Agent — Foundry IQ / knowledge base agent.
+VA Loan Advisor Agent — Foundry IQ via MCP.
 
-Answers VA loan eligibility, product, and process questions using a real
-Azure AI Foundry FileSearch (Foundry IQ) vector store. Knowledge source
-markdown files are uploaded to the agent service and indexed in a vector
-store; the agent performs grounded RAG over them at query time.
+Connects to an Azure AI Search Knowledge Base that was created in the
+Foundry portal using the MCP protocol as documented at:
+https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/foundry-iq-connect
 
-The agent is registered via AIProjectClient.agents.create_version() which
-creates a "new agent" (not a classic assistant) visible in the Foundry portal.
-Vector store creation still uses AgentsClient (the only API that supports
-file upload and vector store management).
+Connection setup (one-time per environment):
+  initialize() creates a RemoteTool project connection via the Azure Resource
+  Manager API so the agent can reach the KB MCP endpoint using the project's
+  managed identity.  The PUT is idempotent — safe to call on every startup.
+
+Agent registration:
+  A PromptAgentDefinition is created with MCPTool pointing at the KB MCP
+  endpoint via that connection.  The agent is registered once and reused on
+  subsequent starts.
+
+Required environment variables:
+  PROJECT_ENDPOINT         — Foundry project data-plane endpoint
+  MODEL_DEPLOYMENT_NAME    — e.g. gpt-4.1
+  KNOWLEDGE_BASE_NAME      — KB index name in Azure AI Search
+  AZURE_AI_SEARCH_ENDPOINT — e.g. https://my-search.search.windows.net
+  PROJECT_RESOURCE_ID      — ARM resource ID of the Foundry project
+  MCP_CONNECTION_NAME      — Name for the RemoteTool connection to create/reuse
 """
 
 import asyncio
 import logging
 import os
-from pathlib import Path
+import re
 from typing import AsyncGenerator
+from urllib.parse import urlparse
 
+import requests
 from azure.ai.projects.aio import AIProjectClient
-from azure.ai.projects.models import PromptAgentDefinition, FileSearchTool
-from azure.ai.agents.aio import AgentsClient
+from azure.ai.projects.models import MCPTool, PromptAgentDefinition
 from azure.core.exceptions import ResourceNotFoundError
+from azure.identity import DefaultAzureCredential as SyncCredential
+from azure.identity import get_bearer_token_provider
 from azure.identity.aio import DefaultAzureCredential
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Knowledge source registry
+# Agent instructions — optimised for KB grounding per MS docs guidance
 # ---------------------------------------------------------------------------
 
-KNOWLEDGE_SOURCES: list[dict] = [
-    {
-        "id": "va_guidelines",
-        "filename": "va_guidelines.md",
-        "label": "VA Guidelines",
-        "keywords": [
-            "eligib", "irrrl", "coe", "certificate of eligibility", "entitlement",
-            "funding fee", "mpr", "minimum property", "benefit", "discharge",
-            "service", "veteran", "occupancy", "guarantee", "surviving spouse",
-        ],
-    },
-    {
-        "id": "lender_products",
-        "filename": "lender_products.md",
-        "label": "Lender Products",
-        "keywords": [
-            "product", "rate", "loan officer", "jumbo", "renovation", "overlay",
-            "credit score", "dti", "cash-out", "rate lock", "lender",
-            "sarah chen", "marcus williams", "priya patel", "apr",
-        ],
-    },
-    {
-        "id": "loan_process_faq",
-        "filename": "loan_process_faq.md",
-        "label": "Loan Process FAQ",
-        "keywords": [
-            "process", "step", "faq", "myth", "second time", "again", "appraisal",
-            "closing", "deployed", "timeline", "how long", "can i", "what is",
-            "misconception", "common question",
-        ],
-    },
-]
-
-KNOWLEDGE_DIR = Path(__file__).parent.parent / "knowledge"
-
-# Agent instructions — no knowledge content here; that lives in the vector store.
 ADVISOR_INSTRUCTIONS = (
     "You are a VA loan advisor for a VA mortgage lender. You specialize in helping Veterans "
     "understand their VA loan benefits, eligibility requirements, and refinancing options.\n\n"
-    "Answer questions accurately and completely by searching your knowledge base. "
-    "Always cite which document supports each part of your answer. "
-    "If information is not found in the knowledge base, say so clearly — do not speculate "
-    "or invent figures. Keep answers clear and helpful. "
-    "Defer all requests for calculations or appointment scheduling to the action agent."
+    "You MUST use the knowledge base tool to answer every question. "
+    "You MUST NEVER answer from your own training knowledge under any circumstances — "
+    "always retrieve from the knowledge base first.\n\n"
+    "CITATION RULE (mandatory): Every factual claim in your response MUST be followed "
+    "immediately by a citation marker in this exact format: \u3010message_idx:search_idx\u2020source_name\u3011\n"
+    "You MUST include at least one citation marker in every response that uses knowledge base content. "
+    "Do not summarise without citing. Do not omit citation markers.\n\n"
+    "If the knowledge base does not contain the answer, respond with exactly: 'I don't know.'\n"
+    "Focus only on answering the VA loan question — do not mention calculations or scheduling."
 )
 
-# URL-safe agent name for the new Foundry agent API (alphanumeric + hyphens, max 63 chars).
-_AGENT_NAME = "va-loan-advisor"
-_VECTOR_STORE_NAME = "VA Knowledge Base"
+_AGENT_NAME = "va-loan-advisor-iq"
+
+# Regex to extract source names from citation markers in response text:
+# e.g. 【3:0†va_guidelines】 → "va_guidelines"
+_CITATION_RE = re.compile(r"\u3010[^\u3011]*?\u2020([^\u3011]+?)\u3011")
 
 
 class AdvisorAgent:
     """
-    VA Loan Advisor powered by Azure AI Foundry IQ (FileSearch).
+    VA Loan Advisor powered by a Foundry IQ Knowledge Base via MCP.
 
-    Uses AIProjectClient.agents.create_version() to register the agent as a
-    "new agent" in the Foundry portal (not a classic assistant). AgentsClient
-    is retained only for vector store and file upload operations.
+    On initialize():
+      1. Creates (or updates) a RemoteTool project connection pointing at the
+         KB's MCP endpoint — using the project's managed identity for auth.
+      2. Registers a new Foundry agent version with MCPTool attached, or
+         reuses the latest existing version if the agent already exists.
 
-    On first initialization, uploads the three knowledge source markdown
-    files, creates a named vector store, and registers a new agent version
-    pointing at that vector store. On subsequent initializations, the
-    existing vector store and agent version are reused.
-
-    Usage::
-
-        agent = AdvisorAgent()
-        await agent.initialize()
-        async for event in agent.run(query):
-            process_event(event)
-        await agent.close()
+    On run():
+      Calls the Responses API via the registered agent, then parses citation
+      markers from the response text and emits them as advisor_source events.
     """
 
     def __init__(self) -> None:
         self._project_client: AIProjectClient | None = None
-        self._agents_client: AgentsClient | None = None
         self._agent_version: str | None = None
-        self._vector_store_id: str | None = None
-        self._knowledge: dict[str, str] = self._load_knowledge()
-
-    def _load_knowledge(self) -> dict[str, str]:
-        """Load knowledge source content from disk at construction time."""
-        result: dict[str, str] = {}
-        for source in KNOWLEDGE_SOURCES:
-            path = KNOWLEDGE_DIR / source["filename"]
-            try:
-                result[source["id"]] = path.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                logger.warning("advisor_agent: knowledge file not found: %s", path)
-                result[source["id"]] = ""
-        return result
 
     @property
     def agent_version(self) -> str:
-        """Foundry agent version — available after initialize() has been called."""
         if self._agent_version is None:
             raise RuntimeError("AdvisorAgent.initialize() has not been called")
         return self._agent_version
 
     # ------------------------------------------------------------------
-    # Setup
+    # Internal helpers
     # ------------------------------------------------------------------
 
     def _get_project_client(self) -> AIProjectClient:
-        """Return the AIProjectClient used for agent registration and running."""
         if self._project_client is None:
             self._project_client = AIProjectClient(
                 endpoint=os.environ["PROJECT_ENDPOINT"],
@@ -142,96 +103,81 @@ class AdvisorAgent:
             )
         return self._project_client
 
-    def _get_agents_client(self) -> AgentsClient:
-        """Return the AgentsClient used only for vector store and file operations."""
-        if self._agents_client is None:
-            self._agents_client = AgentsClient(
-                endpoint=os.environ["PROJECT_ENDPOINT"],
-                credential=DefaultAzureCredential(),
-            )
-        return self._agents_client
+    def _kb_mcp_endpoint(self) -> str:
+        """Return the Azure AI Search KB MCP endpoint URL."""
+        base = os.environ["AZURE_AI_SEARCH_ENDPOINT"].rstrip("/")
+        kb = os.environ["KNOWLEDGE_BASE_NAME"]
+        return f"{base}/knowledgebases/{kb}/mcp?api-version=2025-11-01-preview"
 
-    async def _get_or_create_vector_store(self, client: AgentsClient) -> str:
+    # ------------------------------------------------------------------
+    # Connection provisioning (ARM — sync, run in thread)
+    # ------------------------------------------------------------------
+
+    def _create_or_update_connection(self) -> None:
         """
-        Return the ID of the 'VA Knowledge Base' vector store, creating it
-        (and uploading the knowledge files) if it does not yet exist.
+        PUT a RemoteTool project connection via Azure Resource Manager.
+
+        Uses ProjectManagedIdentity auth so the agent can call the KB MCP
+        endpoint without embedding credentials.  Idempotent — safe to call
+        on every startup.
         """
-        try:
-            async for vs in client.vector_stores.list():
-                if vs.name == _VECTOR_STORE_NAME:
-                    logger.info(
-                        "advisor_agent: reusing vector store '%s' id=%s",
-                        _VECTOR_STORE_NAME,
-                        vs.id,
-                    )
-                    return vs.id
-        except Exception:
-            logger.debug("advisor_agent: could not list vector stores — will create new")
+        project_resource_id = os.environ["PROJECT_RESOURCE_ID"]
+        connection_name = os.environ["MCP_CONNECTION_NAME"]
+        mcp_ep = self._kb_mcp_endpoint()
 
-        file_ids: list[str] = []
-        for source in KNOWLEDGE_SOURCES:
-            path = KNOWLEDGE_DIR / source["filename"]
-            if not path.exists():
-                logger.warning(
-                    "advisor_agent: knowledge file not found, skipping: %s", path
-                )
-                continue
+        cred = SyncCredential()
+        token_provider = get_bearer_token_provider(
+            cred, "https://management.azure.com/.default"
+        )
+        headers = {"Authorization": f"Bearer {token_provider()}"}
 
-            logger.info(
-                "advisor_agent: uploading '%s' to Foundry agent service", source["filename"]
-            )
-            uploaded = await client.files.upload_and_poll(
-                file_path=str(path),
-                purpose="assistants",
-            )
-            file_ids.append(uploaded.id)
-            logger.info(
-                "advisor_agent: uploaded '%s' → file_id=%s",
-                source["filename"],
-                uploaded.id,
-            )
-
-        if not file_ids:
-            raise RuntimeError(
-                "advisor_agent: no knowledge files were uploaded — "
-                "check that the knowledge/ directory exists and contains .md files"
-            )
+        url = (
+            f"https://management.azure.com{project_resource_id}"
+            f"/connections/{connection_name}?api-version=2025-10-01-preview"
+        )
+        body = {
+            "name": connection_name,
+            "type": "Microsoft.MachineLearningServices/workspaces/connections",
+            "properties": {
+                "authType": "ProjectManagedIdentity",
+                "category": "RemoteTool",
+                "target": mcp_ep,
+                "isSharedToAll": True,
+                "audience": "https://search.azure.com/",
+                "metadata": {"ApiType": "Azure"},
+            },
+        }
 
         logger.info(
-            "advisor_agent: creating vector store '%s' from %d file(s)",
-            _VECTOR_STORE_NAME,
-            len(file_ids),
+            "advisor_agent: creating/updating RemoteTool connection '%s' → %s",
+            connection_name,
+            mcp_ep,
         )
-        vector_store = await client.vector_stores.create_and_poll(
-            file_ids=file_ids,
-            name=_VECTOR_STORE_NAME,
-        )
+        resp = requests.put(url, headers=headers, json=body, timeout=30)
+        resp.raise_for_status()
         logger.info(
-            "advisor_agent: vector store '%s' ready id=%s",
-            _VECTOR_STORE_NAME,
-            vector_store.id,
+            "advisor_agent: connection '%s' ready (status %s)",
+            connection_name,
+            resp.status_code,
         )
-        return vector_store.id
+
+    # ------------------------------------------------------------------
+    # Initialize
+    # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
         """
-        Create or retrieve the Foundry agent and its knowledge base.
+        Provision the MCP connection and register the Foundry agent.
 
         Steps:
-        1. Find or create the 'VA Knowledge Base' vector store (uploading
-           markdown files if needed) via AgentsClient.
-        2. Register a new agent version via AIProjectClient.agents.create_version(),
-           or reuse the latest existing version if the agent already exists.
-
-        After this call the agent appears as a 'new agent' in the Foundry
-        portal with its FileSearch knowledge base attached.
+          1. Create/update the RemoteTool project connection via ARM.
+          2. Reuse the latest existing agent version, or create a new one.
         """
-        agents_client = self._get_agents_client()
-        self._vector_store_id = await self._get_or_create_vector_store(agents_client)
+        # Connection provisioning is a sync ARM call — run in a thread.
+        await asyncio.to_thread(self._create_or_update_connection)
 
         project_client = self._get_project_client()
         model = os.environ["MODEL_DEPLOYMENT_NAME"]
-        file_search = FileSearchTool(vector_store_ids=[self._vector_store_id])
 
         # Reuse existing agent version if available.
         try:
@@ -244,49 +190,161 @@ class AdvisorAgent:
             )
             return
         except ResourceNotFoundError:
-            logger.debug("advisor_agent: no existing agent found — will create new version")
+            logger.debug("advisor_agent: no existing agent — will create new version")
+
+        connection_name = os.environ["MCP_CONNECTION_NAME"]
+        mcp_tool = MCPTool(
+            server_label="knowledge-base",
+            server_url=self._kb_mcp_endpoint(),
+            require_approval="never",
+            allowed_tools=["knowledge_base_retrieve"],
+            project_connection_id=connection_name,
+        )
 
         version_details = await project_client.agents.create_version(
             agent_name=_AGENT_NAME,
-            description="VA Loan Advisor — Foundry IQ knowledge base agent",
+            description="VA Loan Advisor — Foundry IQ Knowledge Base via MCP",
             definition=PromptAgentDefinition(
                 model=model,
                 instructions=ADVISOR_INSTRUCTIONS,
-                tools=[file_search],
+                tools=[mcp_tool],
             ),
         )
         self._agent_version = version_details.version
         logger.info(
-            "advisor_agent: created Foundry agent '%s' version=%s with vector store id=%s",
+            "advisor_agent: created Foundry agent '%s' version=%s with KB MCP tool",
             _AGENT_NAME,
             self._agent_version,
-            self._vector_store_id,
         )
 
     # ------------------------------------------------------------------
-    # Knowledge relevance (UI hint — pre-query source labeling)
+    # Citation helpers
     # ------------------------------------------------------------------
 
-    def _relevant_sources(self, query: str) -> list[dict]:
+    @staticmethod
+    def _filename_from_url(url: str) -> str:
+        """Return just the filename portion of a blob URL, or the raw value if not a URL."""
+        try:
+            return os.path.basename(urlparse(url).path) or url
+        except Exception:
+            return url
+
+    def _replace_citation_labels(self, text: str, response) -> str:
         """
-        Score knowledge sources by keyword relevance to the query.
+        Replace the generic †source label inside each 【idx:idx†source】 marker
+        with the actual filename from the corresponding url_citation annotation.
 
-        These labels are used to emit advisor_source events before the agent
-        runs — giving the UI something to show immediately. The actual
-        retrieval is performed by Foundry IQ (FileSearch) at run time.
-        va_guidelines is always included as it covers the broadest set of
-        VA eligibility questions.
+        Annotations carry start_index/end_index positions that map exactly to
+        the markers in the text.  We collect all replacements, sort them in
+        reverse position order so that earlier indices aren't invalidated, then
+        apply them as string slice swaps.
         """
-        query_lower = query.lower()
-        scored: list[tuple[int, dict]] = []
+        replacements: list[tuple[int, int, str]] = []  # (start, end, new_text)
+        try:
+            for item in response.output or []:
+                item_type = getattr(item, "type", None) or (
+                    item.get("type") if isinstance(item, dict) else None
+                )
+                if item_type != "message":
+                    continue
+                content_list = getattr(item, "content", None) or (
+                    item.get("content") if isinstance(item, dict) else []
+                )
+                for content in content_list or []:
+                    for ann in getattr(content, "annotations", None) or (
+                        content.get("annotations") if isinstance(content, dict) else []
+                    ) or []:
+                        ann_type = getattr(ann, "type", None) or (
+                            ann.get("type") if isinstance(ann, dict) else None
+                        )
+                        if ann_type != "url_citation":
+                            continue
+                        start = getattr(ann, "start_index", None) or (
+                            ann.get("start_index") if isinstance(ann, dict) else None
+                        )
+                        end = getattr(ann, "end_index", None) or (
+                            ann.get("end_index") if isinstance(ann, dict) else None
+                        )
+                        raw_url = getattr(ann, "title", None) or getattr(ann, "url", None) or (
+                            ann.get("title") or ann.get("url") if isinstance(ann, dict) else None
+                        )
+                        if start is None or end is None or not raw_url:
+                            continue
+                        filename = self._filename_from_url(raw_url)
+                        # The annotated slice is the full 【...†source】 marker.
+                        # Build the replacement with the real filename.
+                        original = text[start:end]
+                        replaced = _CITATION_RE.sub(
+                            lambda m, fn=filename: f"\u3010{m.group(0)[1:-1].rsplit('\u2020', 1)[0]}\u2020{fn}\u3011",
+                            original,
+                        )
+                        if replaced != original:
+                            replacements.append((start, end, replaced))
+        except Exception:
+            logger.debug("advisor_agent: citation label replacement failed", exc_info=True)
+            return text
 
-        for source in KNOWLEDGE_SOURCES:
-            hits = sum(1 for kw in source["keywords"] if kw in query_lower)
-            if hits > 0 or source["id"] == "va_guidelines":
-                scored.append((hits, source))
+        # Apply in reverse order to preserve earlier indices.
+        for start, end, new_text in sorted(replacements, key=lambda t: t[0], reverse=True):
+            text = text[:start] + new_text + text[end:]
+        return text
 
-        scored.sort(key=lambda t: t[0], reverse=True)
-        return [s for _, s in scored]
+    def _extract_citations(self, response_text: str, response) -> list[str]:
+        """
+        Return a deduplicated list of human-readable cited source filenames.
+
+        Strategy 1 — url_citation / file_citation annotations on the message output
+        item.  These carry the actual blob URL in their title/url field, from which
+        we extract just the filename (e.g. 'va_guidelines.md').  This is the most
+        reliable source and is tried first.
+
+        Strategy 2 — 【idx:idx†source_name】 markers parsed from the response text,
+        used as a fallback.  Generic labels like 'source' are filtered out.
+        """
+        # ── Strategy 1: url_citation annotations (preferred) ──────────────────
+        cited: list[str] = []
+        seen: set[str] = set()
+        try:
+            for item in response.output or []:
+                item_type = getattr(item, "type", None) or (
+                    item.get("type") if isinstance(item, dict) else None
+                )
+                if item_type != "message":
+                    continue
+                content_list = getattr(item, "content", None) or (
+                    item.get("content") if isinstance(item, dict) else []
+                )
+                for content in content_list or []:
+                    for ann in getattr(content, "annotations", None) or (
+                        content.get("annotations") if isinstance(content, dict) else []
+                    ) or []:
+                        ann_type = getattr(ann, "type", None) or (
+                            ann.get("type") if isinstance(ann, dict) else None
+                        )
+                        raw: str | None = None
+                        if ann_type == "url_citation":
+                            raw = getattr(ann, "title", None) or getattr(ann, "url", None) or (
+                                ann.get("title") or ann.get("url") if isinstance(ann, dict) else None
+                            )
+                        elif ann_type == "file_citation":
+                            raw = getattr(ann, "filename", None) or (
+                                ann.get("filename") if isinstance(ann, dict) else None
+                            )
+                        if raw:
+                            name = self._filename_from_url(raw)
+                            if name and name not in seen:
+                                seen.add(name)
+                                cited.append(name)
+        except Exception:
+            logger.debug("advisor_agent: annotation extraction failed", exc_info=True)
+
+        if cited:
+            return cited
+
+        # ── Strategy 2: text markers, filter generic labels ───────────────────
+        _GENERIC = {"source", "sources", "document", "documents", ""}
+        raw_markers = list(dict.fromkeys(_CITATION_RE.findall(response_text)))
+        return [s for s in raw_markers if s.lower() not in _GENERIC]
 
     # ------------------------------------------------------------------
     # Run
@@ -294,26 +352,19 @@ class AdvisorAgent:
 
     async def run(self, query: str) -> AsyncGenerator[dict, None]:
         """
-        Answer a VA loan question using Foundry IQ (FileSearch), streaming
+        Answer a VA loan question via the Foundry IQ KB MCP tool, streaming
         SSE-compatible events as the agent works.
 
-        Yields dicts with at least a ``type`` and ``message`` key.
-        The final event has ``type == "_advisor_text"`` and carries the full
-        response text in the ``text`` key; consumed by the orchestrator.
+        The final event has type ``_advisor_text`` carrying the full response
+        text in the ``text`` key; consumed by the orchestrator.
         """
         yield {"type": "advisor_start", "message": "VA Loan Advisor activated"}
+        yield {
+            "type": "advisor_source",
+            "message": f"Searching: {os.environ.get('KNOWLEDGE_BASE_NAME', 'knowledge base')}",
+            "source_id": "knowledge_base",
+        }
 
-        # Emit pre-query source hints so the UI shows activity immediately.
-        relevant = self._relevant_sources(query)
-        for source in relevant:
-            yield {
-                "type": "advisor_source",
-                "message": f"Querying: {source['filename']}",
-                "source_id": source["id"],
-            }
-            await asyncio.sleep(0.25)
-
-        # Ensure agent and vector store are initialized.
         if not self._agent_version:
             await self.initialize()
 
@@ -339,12 +390,24 @@ class AdvisorAgent:
             yield {"type": "error", "message": f"Advisor agent error: {exc}"}
             return
 
+        # Emit named citations; skip if the KB only returned a generic label.
+        citations = self._extract_citations(response_text, response)
+        for source in citations:
+            yield {
+                "type": "advisor_source",
+                "message": f"Cited: {source}",
+                "source_id": "kb_citation",
+            }
+            await asyncio.sleep(0.1)
+
+        # Count raw chunk markers (including generic-label ones) for the result message.
+        chunk_count = len(_CITATION_RE.findall(response_text)) or len(citations) or 1
         yield {
             "type": "advisor_result",
-            "message": f"Answer ready — {len(relevant)} source(s) searched via Foundry IQ",
+            "message": f"Answer ready — {chunk_count} chunk(s) retrieved from Knowledge Base",
         }
 
-        # Internal event carrying the response text; consumed by orchestrator.
+        response_text = self._replace_citation_labels(response_text, response)
         yield {"type": "_advisor_text", "text": response_text}
 
     # ------------------------------------------------------------------
@@ -356,6 +419,3 @@ class AdvisorAgent:
         if self._project_client is not None:
             await self._project_client.close()
             self._project_client = None
-        if self._agents_client is not None:
-            await self._agents_client.close()
-            self._agents_client = None

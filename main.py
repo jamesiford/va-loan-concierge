@@ -29,7 +29,7 @@ from azure.ai.projects.models import PromptAgentDefinition
 from azure.core.exceptions import ResourceNotFoundError
 from azure.identity.aio import DefaultAzureCredential
 
-from agents.advisor_agent import AdvisorAgent, KNOWLEDGE_SOURCES
+from agents.advisor_agent import AdvisorAgent
 from agents.action_agent import ActionAgent
 from tools.refi_calculator import RefiCalculatorInput
 from tools.appointment_scheduler import AppointmentInput
@@ -147,25 +147,6 @@ def _route_label(needs_advisor: bool, needs_action: bool) -> str:
         return "Advisor Agent"
     return "Action Agent"
 
-
-def _relevant_sources_hint(query: str) -> list[dict]:
-    """Return knowledge sources likely to be relevant (keyword-based hint)."""
-    q = query.lower()
-    result = []
-    relevance_keywords = {
-        "va_guidelines": ["eligib", "irrrl", "coe", "entitlement", "funding fee",
-                          "mpr", "benefit", "veteran", "guarantee"],
-        "lender_products": ["product", "rate", "loan officer", "jumbo", "overlay",
-                            "credit score", "dti", "cash-out", "lender"],
-        "loan_process_faq": ["process", "step", "faq", "myth", "second time",
-                             "appraisal", "deployed", "how long", "can i"],
-    }
-    for source in KNOWLEDGE_SOURCES:
-        hits = sum(1 for kw in relevance_keywords.get(source["id"], []) if kw in q)
-        if hits > 0 or source["id"] == "va_guidelines":
-            result.append((hits, source))
-    result.sort(key=lambda t: t[0], reverse=True)
-    return [s for _, s in result]
 
 
 def _demo_context_block(query: str) -> str:
@@ -399,15 +380,6 @@ class Orchestrator:
             "message": f"Routing to: {_route_label(needs_advisor, needs_action)}",
         }
         await asyncio.sleep(0.15)
-
-        if needs_advisor:
-            for source in _relevant_sources_hint(query):
-                yield {
-                    "type": "advisor_source",
-                    "message": f"Querying: {source['filename']}",
-                    "source_id": source["id"],
-                }
-                await asyncio.sleep(0.2)
 
         # ── Run advisor agent ────────────────────────────────────────────
         advisor_text = ""
