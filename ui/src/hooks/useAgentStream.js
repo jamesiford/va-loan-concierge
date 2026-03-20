@@ -124,7 +124,7 @@ export function useAgentStream() {
   const [isStreaming, setIsStreaming] = useState(false);
   const isRunning = useRef(false);
 
-  const sendQuery = useCallback(async (query) => {
+  const sendQuery = useCallback(async (query, profileId = null) => {
     if (!query || isRunning.current) return;
     isRunning.current = true;
     setFlowEvents([]);
@@ -134,7 +134,7 @@ export function useAgentStream() {
     if (MOCK_MODE) {
       await _runMock(query, setFlowEvents, setMessages);
     } else {
-      await _runLive(query, setFlowEvents, setMessages);
+      await _runLive(query, profileId, setFlowEvents, setMessages);
     }
 
     setIsStreaming(false);
@@ -167,13 +167,15 @@ async function _runMock(query, setFlowEvents, setMessages) {
 }
 
 // ── Live SSE runner ───────────────────────────────────────────────
-async function _runLive(query, setFlowEvents, setMessages) {
+async function _runLive(query, profileId, setFlowEvents, setMessages) {
   let id = Date.now();
   try {
+    const body = { query };
+    if (profileId) body.profile_id = profileId;
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);

@@ -1,2 +1,323 @@
-# va-loan-concierge
-This project is a demonstration of Microsoft Foundry's multi-agent capabilities for a VA mortgage lender. It showcases two distinct Foundry capabilities: Foundry IQ and MCP working together in a coordinated agent workflow.
+# VA Loan Concierge
+
+A multi-agent demo for a VA mortgage lender built on **Microsoft Azure AI Foundry**. The application showcases two distinct Foundry capabilities — **Foundry IQ** (grounded knowledge-base RAG) and **MCP** (live tool invocation via a custom Azure Function) — working together in a real-time, streaming agent workflow.
+
+---
+
+## What It Does
+
+A Veteran borrower interacts with a single chat interface. A single query like:
+
+> *"I'm thinking about refinancing — am I eligible for an IRRRL, and can you show me what I'd save and schedule a call for Thursday?"*
+
+…triggers a multi-agent pipeline that:
+
+1. Answers VA loan eligibility questions with **cited, knowledge-base-grounded responses**
+2. Runs a **live refinance savings calculator** using real amortization math
+3. **Books a consultation appointment** with a loan officer
+4. Streams every step of the reasoning — agent activations, tool calls, source citations — to a real-time Agent Flow Log in the UI
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Browser (React UI)                        │
+│                                                                   │
+│  ┌──────────────────────┐   ┌──────────────────────────────────┐ │
+│  │      Chat Panel      │   │        Agent Flow Log            │ │
+│  │  (conversation)      │   │   (live reasoning trace)         │ │
+│  └──────────┬───────────┘   └──────────────────────────────────┘ │
+└─────────────┼───────────────────────────────────────────────────┘
+              │ POST /api/chat  (SSE stream)
+              ▼
+┌─────────────────────────┐
+│     FastAPI Backend     │   Streams SSE events to the UI
+│     (api/server.py)     │
+└────────────┬────────────┘
+             │
+             ▼
+┌────────────────────────┐
+│      Orchestrator      │   LLM-driven routing via Foundry agent
+│      (main.py)         │   Foundry portal: va-loan-orchestrator
+└────────┬───────────────┘
+         │
+    ┌────┴─────┐
+    │          │
+    ▼          ▼
+┌──────────┐  ┌───────────────┐
+│ Advisor  │  │    Action     │
+│  Agent   │  │    Agent      │
+│          │  │               │
+│ Foundry  │  │  Custom MCP   │
+│    IQ    │  │    Server     │
+└────┬─────┘  └───────┬───────┘
+     │                │
+     ▼                ▼
+  Azure AI        Azure Function App
+  Search KB       refi_savings_calculator
+  (3 docs)        appointment_scheduler
+```
+
+### Agent Roles
+
+| Agent | Foundry Name | Capability | Purpose |
+|---|---|---|---|
+| Orchestrator | `va-loan-orchestrator` | New Foundry agent (Responses API) | LLM-driven routing — classifies each query and decides which agent(s) to invoke |
+| VA Loan Advisor | `va-loan-advisor-iq` | Foundry IQ via MCPTool | Answers eligibility, product, and process questions grounded in 3 knowledge sources |
+| Loan Action Agent | `va-loan-action-mcp` | Custom MCP via MCPTool | Runs refinance calculations and books appointments via Azure-hosted MCP tools |
+
+---
+
+## Key Features
+
+### Foundry IQ — Grounded Knowledge Base (Advisor Agent)
+
+The Advisor Agent connects to an **Azure AI Search Knowledge Base** created in the Foundry portal. It uses the MCP protocol with `ProjectManagedIdentity` auth — no API keys.
+
+**Knowledge sources (3 documents):**
+- `va_guidelines.md` — VA eligibility rules, COE requirements, IRRRL rules, funding fee tables, entitlement, MPRs
+- `lender_products.md` — Lender loan products, IRRRL, Cash-Out Refi, VA Jumbo, overlays
+- `loan_process_faq.md` — Borrower FAQ, process steps, myths, edge cases (deployed borrowers, second-time use)
+
+Every factual claim in the response includes a **citation marker** (`【idx†source】`) that is extracted, resolved to a filename, and streamed to the UI as a source chip in the Agent Flow Log.
+
+### Custom MCP Server — Live Tool Invocation (Action Agent)
+
+The Action Agent connects to an **Azure Function App** (`mcp-server/`) that implements the MCP JSON-RPC protocol directly over HTTP. No `mcp` Python package is required — the Function App handles `initialize`, `tools/list`, `tools/call`, and `ping` as a plain HTTP trigger.
+
+**MCP Tools:**
+
+**`refi_savings_calculator`** — Real amortization math (not hardcoded):
+- Inputs: `current_rate`, `new_rate`, `balance`, `remaining_term`, `funding_fee_exempt`
+- Computes: monthly payment delta, annual savings, break-even timeline, lifetime savings net of closing costs
+- Applies actual VA IRRRL closing cost structure ($4,050 base + 0.5% funding fee, waived if disability-exempt)
+- Returns whether the **VA net tangible benefit test** passes (break-even ≤ 36 months)
+
+**`appointment_scheduler`** — Books a consultation slot:
+- Inputs: `preferred_day`, `preferred_time`, optional `loan_officer`
+- Normalizes fuzzy inputs ("morning", "afternoon", "thurs")
+- Returns a confirmed slot with loan officer name, calendar date, and a stable confirmation number
+
+### LLM-Driven Routing
+
+The Orchestrator classifies each query by calling the `va-loan-orchestrator` Foundry agent via the Responses API. The response is a JSON routing decision `{"needs_advisor": bool, "needs_action": bool}`. Keyword matching serves as a fallback if the LLM call fails.
+
+### Real-Time SSE Streaming
+
+Every step of the agent pipeline emits a structured event streamed to the browser as **Server-Sent Events**. The UI renders each event as it arrives — no polling.
+
+| Event Type | Meaning |
+|---|---|
+| `orchestrator_start` | Query received, analyzing intent |
+| `orchestrator_route` | Routing decision emitted |
+| `advisor_start` | Advisor Agent activated |
+| `advisor_source` | Knowledge source queried / citation found |
+| `advisor_result` | Advisor answer ready |
+| `action_start` | Action Agent activated |
+| `action_tool_call` | MCP tool invoked (shows tool name + inputs) |
+| `action_tool_result` | MCP tool returned (shows key outputs) |
+| `handoff` | Control passed between agents |
+| `orchestrator_synthesize` | Merging results |
+| `complete` | Full response ready |
+| `final_response` | Synthesized answer text |
+
+### Demo Borrower Profiles
+
+Three selectable borrower profiles inject personalized context into every agent query, making the demo more realistic and demonstrating how the same pipeline handles different scenarios:
+
+| Profile | Background | Demo Scenario |
+|---|---|---|
+| **Marcus T.** | Army Veteran, 10% service-connected disability, existing VA loan at 6.8% | IRRRL flagship — funding fee exempt, full savings calc + booking |
+| **Sarah K.** | Navy Veteran, first-time VA buyer, no existing loan | Purchase eligibility — correctly blocked from IRRRL (no existing loan) |
+| **Lt. James R.** | Active duty, OCONUS deployed, second VA loan use | Second-use eligibility + refi calc on a higher balance |
+
+When no profile is selected, agents are instructed to gather personal details conversationally.
+
+---
+
+## Tech Stack
+
+### Backend
+
+| Component | Technology |
+|---|---|
+| Language | Python 3.11+ |
+| API server | FastAPI + uvicorn (SSE streaming) |
+| Foundry SDK | `azure-ai-projects >= 2.0.1` (new-agent API — not classic) |
+| Auth | `azure-identity` (`DefaultAzureCredential`) |
+| MCP server | Azure Functions v2 (plain HTTP trigger, no `mcp` package) |
+| ARM provisioning | `requests` — RemoteTool connection PUT at startup |
+| Env management | `python-dotenv` |
+| Tests | `pytest` — 74 tests across all three agents |
+
+### Frontend
+
+| Component | Technology |
+|---|---|
+| Framework | React 18 + Vite |
+| Styling | Tailwind CSS v3 |
+| Streaming | Native `fetch` with SSE parsing |
+| Fonts | Poppins (header) + DM Sans (body) |
+| Dev proxy | Vite → FastAPI on port 8000 |
+
+---
+
+## Project Structure
+
+```
+va-loan-concierge/
+├── main.py                      # Orchestrator — routing, demo profiles, CLI entry point
+├── requirements.txt
+│
+├── agents/
+│   ├── advisor_agent.py         # Foundry IQ KB via MCPTool + ARM connection provisioning
+│   └── action_agent.py          # Custom MCP via MCPTool + ARM connection provisioning
+│
+├── api/
+│   └── server.py                # FastAPI — POST /api/chat SSE endpoint
+│
+├── mcp-server/
+│   ├── function_app.py          # Azure Function HTTP trigger — MCP JSON-RPC handler
+│   ├── server.py                # Tool implementations + MCP inputSchema definitions
+│   ├── host.json                # routePrefix: "" → endpoint at /mcp
+│   └── requirements.txt         # azure-functions only
+│
+├── knowledge/
+│   ├── va_guidelines.md
+│   ├── lender_products.md
+│   └── loan_process_faq.md
+│
+├── tools/                       # Reference implementations (not imported by agents)
+│   ├── refi_calculator.py
+│   └── appointment_scheduler.py
+│
+├── ui/
+│   └── src/
+│       ├── App.jsx              # Root layout + borrower profile state
+│       ├── components/
+│       │   ├── BorrowerProfile.jsx  # Profile selector + detail card
+│       │   ├── ChatPanel.jsx        # Conversation thread + demo query buttons
+│       │   ├── ChatInput.jsx        # Textarea + send button
+│       │   ├── AgentFlowLog.jsx     # Streaming event log panel
+│       │   ├── FlowEvent.jsx        # Single log row
+│       │   └── StatusDot.jsx        # Header status indicator
+│       └── hooks/
+│           └── useAgentStream.js    # SSE connection, mock mode, profile_id injection
+│
+└── tests/
+    ├── conftest.py
+    ├── test_advisor_agent.py
+    ├── test_action_agent.py
+    └── test_orchestrator.py
+```
+
+---
+
+## Setup
+
+### Prerequisites
+
+- Python 3.11+
+- Node.js 18+
+- Azure CLI (`az login` required for `DefaultAzureCredential`)
+- An Azure AI Foundry project with:
+  - A model deployment (e.g. `gpt-4.1`)
+  - A Foundry IQ Knowledge Base (Azure AI Search-backed)
+  - An Azure Function App running `mcp-server/`
+
+### Environment Variables
+
+Copy `.env.example` to `.env` and fill in:
+
+```env
+PROJECT_ENDPOINT=https://<your-project>.api.azureml.ms
+MODEL_DEPLOYMENT_NAME=gpt-4.1
+AZURE_SUBSCRIPTION_ID=<subscription-id>
+PROJECT_RESOURCE_ID=/subscriptions/.../resourceGroups/.../providers/Microsoft.MachineLearningServices/workspaces/...
+
+# Foundry IQ (Advisor Agent)
+KNOWLEDGE_BASE_NAME=kb-va-loan-guidelines
+AZURE_AI_SEARCH_ENDPOINT=https://<search-service>.search.windows.net
+MCP_CONNECTION_NAME=kb-va-loan-demo-mcp
+
+# Custom MCP Server (Action Agent)
+MCP_ENDPOINT=https://<function-app>.azurewebsites.net/mcp
+MCP_ACTION_CONNECTION_NAME=va-loan-action-mcp-conn
+```
+
+### Running
+
+```bash
+# 1. Authenticate
+az login
+
+# 2. Install Python dependencies
+pip install -r requirements.txt
+
+# 3. Start the API server
+uvicorn api.server:app --reload --port 8000
+
+# 4. In a second terminal, start the UI
+cd ui && npm install && npm run dev
+# → http://localhost:5173
+
+# 5. Run tests
+pytest tests/
+```
+
+### Deploy MCP Server
+
+```bash
+cd mcp-server
+func azure functionapp publish <app-name>
+```
+
+---
+
+## Azure RBAC Requirements
+
+| Resource | Role | Assigned To |
+|---|---|---|
+| Azure AI Search service | `Search Index Data Reader` | Foundry project managed identity |
+| Azure OpenAI resource | `Cognitive Services OpenAI User` | Search service managed identity |
+
+The search service auth mode must be `aadOrApiKey` (not `apiKeyOnly`).
+
+---
+
+## Demo Script
+
+Run the flagship scenario from the CLI:
+
+```bash
+python main.py
+```
+
+Default query:
+> *"I'm thinking about refinancing my VA loan. Am I eligible for an IRRRL, and can you show me what I'd save and schedule a call for Thursday?"*
+
+Expected output:
+1. Orchestrator classifies as mixed (advisor + action)
+2. Advisor answers IRRRL eligibility from KB with source citations
+3. Action Agent runs `refi_savings_calculator` → monthly savings, break-even, VA benefit test result
+4. Action Agent calls `appointment_scheduler` → confirmed slot with reference number
+5. Orchestrator synthesizes a single unified response
+
+Or use the UI for the full streaming experience with the Agent Flow Log.
+
+---
+
+## What This Demo Proves
+
+| Capability | Demonstrated By |
+|---|---|
+| Foundry IQ / grounded RAG | Advisor Agent answering from 3 knowledge sources with inline citations |
+| Custom MCP server | Azure Function App implementing MCP JSON-RPC — no SDK dependency |
+| Multi-agent orchestration | Single query routed to two specialized agents, responses synthesized |
+| LLM-driven routing | Orchestrator Foundry agent classifies intent via Responses API |
+| New Foundry agent API | All three agents registered via `create_version` + `PromptAgentDefinition` |
+| Real-time streaming | Every agent step streamed to the browser as SSE events |
+| Profile-aware responses | Borrower context injected per-query; calculator uses real loan parameters |
+| Governed, citable AI | Every factual claim traces back to a specific knowledge document |

@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import { useAgentStream } from './hooks/useAgentStream';
-import ChatPanel    from './components/ChatPanel';
-import ChatInput    from './components/ChatInput';
-import AgentFlowLog from './components/AgentFlowLog';
-import StatusDot    from './components/StatusDot';
+import ChatPanel      from './components/ChatPanel';
+import ChatInput      from './components/ChatInput';
+import AgentFlowLog   from './components/AgentFlowLog';
+import StatusDot      from './components/StatusDot';
+import BorrowerProfile from './components/BorrowerProfile';
 
 export default function App() {
   const { messages, flowEvents, isStreaming, sendQuery, clearEvents } = useAgentStream();
   const [logVisible, setLogVisible] = useState(true);
+  const [profileId, setProfileId] = useState(null);
+
+  const handleSend = (query) => sendQuery(query, profileId);
 
   return (
     <div className="flex flex-col h-screen overflow-hidden">
@@ -52,6 +56,9 @@ export default function App() {
         </div>
       </header>
 
+      {/* ── Borrower profile selector ── */}
+      <BorrowerProfile profileId={profileId} onChange={setProfileId} />
+
       {/* ── Body ── */}
       <div className="flex flex-1 overflow-hidden min-h-0">
 
@@ -63,8 +70,8 @@ export default function App() {
             borderRight: logVisible ? '1px solid #E5E2DC' : 'none',
           }}
         >
-          <ChatPanel messages={messages} isStreaming={isStreaming} onSend={sendQuery} />
-          <ChatInput onSend={sendQuery} disabled={isStreaming} />
+          <ChatPanel messages={messages} isStreaming={isStreaming} onSend={handleSend} />
+          <ChatInput onSend={handleSend} disabled={isStreaming} />
         </div>
 
         {/* Right: Agent Flow Log */}

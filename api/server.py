@@ -95,6 +95,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     query: str
+    profile_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +166,7 @@ async def chat(request: ChatRequest):
 
     async def event_stream():
         try:
-            async for event in orchestrator.run(query):
+            async for event in orchestrator.run(query, profile_id=request.profile_id):
                 yield _sse_frame(event)
         except Exception as exc:
             logger.exception("server: unhandled error during orchestration")
