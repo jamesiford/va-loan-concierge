@@ -1,0 +1,4 @@
+# VA Loan MCP Server — Azure Function App dependencies
+
+# Azure Functions runtime
+azure-functions>=1.21.0

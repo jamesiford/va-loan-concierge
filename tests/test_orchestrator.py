@@ -16,8 +16,6 @@ from main import (
     _demo_context_block,
     _route_label,
     Orchestrator,
-    DEMO_REFI_INPUT,
-    DEMO_APPT_INPUT,
 )
 
 
@@ -86,9 +84,9 @@ class TestClassifyHint:
 class TestDemoContextBlock:
     def test_refinance_query_includes_loan_params(self):
         block = _demo_context_block("I want to refinance my VA loan")
-        assert str(DEMO_REFI_INPUT.current_rate) in block
-        assert str(DEMO_REFI_INPUT.new_rate) in block
-        assert str(DEMO_REFI_INPUT.balance) in block
+        assert "6.8" in block
+        assert "6.1" in block
+        assert "320000" in block
 
     def test_thursday_query_includes_appointment_params(self):
         block = _demo_context_block("Book a call for Thursday")
@@ -101,7 +99,7 @@ class TestDemoContextBlock:
             "and schedule a call for Thursday?"
         )
         block = _demo_context_block(query)
-        assert str(DEMO_REFI_INPUT.current_rate) in block
+        assert "6.8" in block
         assert "Thursday" in block
 
     def test_unrelated_query_returns_empty(self):

@@ -26,13 +26,10 @@ from dotenv import load_dotenv
 
 from azure.ai.projects.aio import AIProjectClient
 from azure.ai.projects.models import PromptAgentDefinition
-from azure.core.exceptions import ResourceNotFoundError
 from azure.identity.aio import DefaultAzureCredential
 
 from agents.advisor_agent import AdvisorAgent
 from agents.action_agent import ActionAgent
-from tools.refi_calculator import RefiCalculatorInput
-from tools.appointment_scheduler import AppointmentInput
 
 load_dotenv()
 
@@ -80,29 +77,12 @@ AND book Thursday"). Default needs_advisor to true if the query is ambiguous.
 """
 
 # ---------------------------------------------------------------------------
-# Demo scenario — flagship query and hardcoded loan parameters
+# Demo scenario — flagship query
 # ---------------------------------------------------------------------------
 
 FLAGSHIP_QUERY = (
     "I'm thinking about refinancing my VA loan. Am I eligible for an IRRRL, "
     "and can you show me what I'd save and schedule a call for Thursday?"
-)
-
-# Hardcoded demo loan parameters — funding_fee_exempt=True (service-connected
-# disability) gives a 29-month break-even that passes the VA net tangible
-# benefit test. The orchestrator passes these to the action agent so the
-# demo always uses the correct numbers.
-DEMO_REFI_INPUT = RefiCalculatorInput(
-    current_rate=6.8,
-    new_rate=6.1,
-    balance=320_000,
-    remaining_term=27,
-    funding_fee_exempt=True,
-)
-
-DEMO_APPT_INPUT = AppointmentInput(
-    preferred_day="Thursday",
-    preferred_time="2:00 PM",
 )
 
 # ---------------------------------------------------------------------------
@@ -164,11 +144,8 @@ def _demo_context_block(query: str) -> str:
         parts.append(
             "[Loan parameters for the refinance calculation — "
             "pass these exactly to the refi_savings_calculator:\n"
-            f"  current_rate={DEMO_REFI_INPUT.current_rate}, "
-            f"new_rate={DEMO_REFI_INPUT.new_rate}, "
-            f"balance={DEMO_REFI_INPUT.balance}, "
-            f"remaining_term={DEMO_REFI_INPUT.remaining_term}, "
-            f"funding_fee_exempt={DEMO_REFI_INPUT.funding_fee_exempt} "
+            "  current_rate=6.8, new_rate=6.1, balance=320000, "
+            "remaining_term=27, funding_fee_exempt=True "
             "(Veteran has service-connected disability)]"
         )
 
@@ -177,34 +154,10 @@ def _demo_context_block(query: str) -> str:
                                "friday", "saturday")):
         parts.append(
             "[Appointment parameters — pass these exactly to appointment_scheduler:\n"
-            f"  preferred_day={DEMO_APPT_INPUT.preferred_day!r}, "
-            f"preferred_time={DEMO_APPT_INPUT.preferred_time!r}]"
+            "  preferred_day='Thursday', preferred_time='2:00 PM']"
         )
 
     return "\n\n" + "\n".join(parts) if parts else ""
-
-
-def _demo_action_inputs(
-    query: str,
-) -> tuple[RefiCalculatorInput | None, AppointmentInput | None]:
-    """
-    Return demo RefiCalculatorInput and AppointmentInput based on query keywords.
-    Both may be None if the query doesn't match the relevant keywords.
-    """
-    q = query.lower()
-    refi = (
-        DEMO_REFI_INPUT
-        if any(kw in q for kw in ("calculat", "saving", "save", "how much", "refinanc", "irrrl"))
-        else None
-    )
-    appt = (
-        DEMO_APPT_INPUT
-        if any(kw in q for kw in ("schedule", "book", "appointment", "call for",
-                                   "monday", "tuesday", "wednesday", "thursday",
-                                   "friday", "saturday"))
-        else None
-    )
-    return refi, appt
 
 
 # ---------------------------------------------------------------------------
@@ -270,18 +223,6 @@ class Orchestrator:
         # Register orchestrator as a new Foundry agent (portal visibility).
         client = self._get_client()
         model = os.environ["MODEL_DEPLOYMENT_NAME"]
-
-        try:
-            existing = await client.agents.get(_ORCHESTRATOR_NAME)
-            self._orchestrator_version = existing.versions.latest.version
-            logger.info(
-                "orchestrator: reusing Foundry agent '%s' version=%s",
-                _ORCHESTRATOR_NAME,
-                self._orchestrator_version,
-            )
-            return
-        except ResourceNotFoundError:
-            logger.debug("orchestrator: no existing agent found — will create new version")
 
         version_details = await client.agents.create_version(
             agent_name=_ORCHESTRATOR_NAME,
@@ -401,9 +342,9 @@ class Orchestrator:
             if needs_advisor and advisor_text:
                 yield {"type": "handoff", "message": "Advisor → Action Agent"}
 
-            refi_input, appt_input = _demo_action_inputs(query)
+            action_query = query + _demo_context_block(query)
             try:
-                async for event in self._action.run(query, refi_input, appt_input):
+                async for event in self._action.run(action_query):
                     if event["type"] == "_action_text":
                         action_text = event.get("text", "")
                     else:

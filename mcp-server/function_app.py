@@ -1,0 +1,107 @@
+"""
+Azure Functions entry point for the VA Loan MCP Server.
+
+Implements the MCP Streamable HTTP transport as a single HTTP trigger.
+No ASGI or mcp package required — JSON-RPC over POST.
+
+MCP endpoint URL (set as MCP_ENDPOINT in the main backend's .env):
+  https://<app-name>.azurewebsites.net/mcp
+"""
+
+import json
+import logging
+
+import azure.functions as func
+
+from server import (
+    TOOL_SCHEMAS,
+    appointment_scheduler,
+    refi_savings_calculator,
+)
+
+logger = logging.getLogger(__name__)
+
+app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+
+_PROTOCOL_VERSION = "2024-11-05"
+_SERVER_INFO = {"name": "va-loan-tools", "version": "1.0.0"}
+
+
+def _ok(request_id: object, result: dict) -> func.HttpResponse:
+    return func.HttpResponse(
+        json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}),
+        status_code=200,
+        headers={"Content-Type": "application/json"},
+    )
+
+
+def _err(request_id: object, code: int, message: str) -> func.HttpResponse:
+    return func.HttpResponse(
+        json.dumps({"jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": code, "message": message}}),
+        status_code=200,
+        headers={"Content-Type": "application/json"},
+    )
+
+
+@app.route(route="mcp", methods=["GET", "POST", "DELETE"])
+async def mcp(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    MCP Streamable HTTP endpoint.
+
+    Handles the three JSON-RPC methods the Foundry runtime invokes:
+      initialize   — exchange protocol version and capabilities
+      tools/list   — return available tool schemas
+      tools/call   — execute a tool and return the result
+    """
+    # GET and DELETE are part of the SSE session management handshake;
+    # return 200 so the Foundry runtime doesn't treat them as errors.
+    if req.method in ("GET", "DELETE"):
+        return func.HttpResponse(status_code=200)
+
+    try:
+        body = req.get_json()
+    except ValueError:
+        return _err(None, -32700, "Parse error")
+
+    method = body.get("method", "")
+    request_id = body.get("id")
+    params = body.get("params") or {}
+
+    logger.info("mcp: %s (id=%s)", method, request_id)
+
+    # Notifications (no id) require no response.
+    if request_id is None:
+        return func.HttpResponse(status_code=202)
+
+    if method == "initialize":
+        return _ok(request_id, {
+            "protocolVersion": _PROTOCOL_VERSION,
+            "capabilities": {"tools": {}},
+            "serverInfo": _SERVER_INFO,
+        })
+
+    if method == "ping":
+        return _ok(request_id, {})
+
+    if method == "tools/list":
+        return _ok(request_id, {"tools": TOOL_SCHEMAS})
+
+    if method == "tools/call":
+        name = params.get("name")
+        arguments = params.get("arguments") or {}
+        try:
+            if name == "refi_savings_calculator":
+                result = refi_savings_calculator(**arguments)
+            elif name == "appointment_scheduler":
+                result = appointment_scheduler(**arguments)
+            else:
+                return _err(request_id, -32601, f"Unknown tool: {name}")
+            return _ok(request_id, {
+                "content": [{"type": "text", "text": json.dumps(result)}],
+            })
+        except Exception as exc:
+            logger.exception("mcp: tool error for '%s'", name)
+            return _err(request_id, -32603, str(exc))
+
+    return _err(request_id, -32601, f"Method not found: {method}")

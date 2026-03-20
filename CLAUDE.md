@@ -543,44 +543,40 @@ auth. The agent is registered with `MCPTool` (not `FileSearchTool` or `AzureAISe
 
 ---
 
-### 2. Azure-Hosted MCP Server (replacing FunctionTool)
+### 2. Azure-Hosted MCP Server (replacing FunctionTool) — ✅ COMPLETE
 
-**Current state:**
-`ActionAgent` registers `refi_savings_calculator` and `appointment_scheduler` as
-`FunctionTool` entries in the `PromptAgentDefinition`. The tools are executed client-side
-in Python (inside `_execute_tool_call()`), with their results fed back to the agent via
-an explicit conversation history loop. The `/tools/` Python files are local simulations —
-no network calls are made.
+**Implemented state:**
+`ActionAgent` connects to an Azure Function App (`mcp-server/`) that exposes the two tools
+as an MCP-compliant HTTP endpoint. The Function App implements the MCP JSON-RPC protocol
+directly (no `mcp` Python package required — pure `azure-functions` HTTP trigger). Tool
+execution happens server-side; `ActionAgent` makes a single Responses API call and parses
+`mcp_call` items from `response.output` to emit `action_tool_call` / `action_tool_result`
+SSE events.
 
-**Target state:**
-The two tools are implemented as an Azure Function App that exposes an MCP-compliant HTTP
-endpoint. The Function App is deployed and managed separately (by the user). `ActionAgent`
-connects to it via the Foundry SDK's MCP client rather than via `FunctionTool`. Tool
-execution happens server-side in the Function App; the agent invokes tools over the MCP
-protocol and receives structured results back.
+**How it works:**
+- `initialize()` PUTs a `RemoteTool` project connection (`MCP_ACTION_CONNECTION_NAME`) via
+  ARM with `authType: "None"` (anonymous Function App), then creates a new agent version
+  with `MCPTool(server_url, project_connection_id, allowed_tools, require_approval="never")`
+- `mcp-server/function_app.py` handles POST `/mcp` and responds to `initialize`,
+  `tools/list`, `tools/call`, and `ping` JSON-RPC methods
+- `mcp-server/server.py` contains the tool implementations and MCP `inputSchema` definitions
+- `run()` makes a single Responses API call; `_parse_mcp_events()` extracts `mcp_call`
+  output items and `_format_tool_result()` formats them into human-readable SSE messages
+- All agents now always call `create_version` on startup (no reuse check) — version counter
+  increments in the Foundry portal on every restart, no manual deletion needed on config changes
 
-**Connection approach:**
-Use `McpTool` from `azure-ai-projects` with `StreamableHTTPServerParams` pointing to the
-Function App's MCP endpoint URL. The endpoint URL is stored in the `MCP_ENDPOINT`
-environment variable (already in `.env.example`). If the Function App requires
-authentication (e.g., Azure AD or a function key), this must be configured in the
-`StreamableHTTPServerParams` headers.
+**Required env vars:**
+- `MCP_ENDPOINT` — Function App MCP URL (e.g. `https://<app>.azurewebsites.net/mcp`)
+- `MCP_ACTION_CONNECTION_NAME` — name for the RemoteTool connection (e.g. `va-loan-action-mcp-conn`)
 
-**Implementation notes for Claude Code:**
-- Replace `FunctionTool` registrations in `ActionAgent.initialize()` with a single
-  `McpTool` referencing the `MCP_ENDPOINT` env var
-- Remove the client-side `_execute_tool_call()`, `_refi_event_inputs()`,
-  `_appt_event_inputs()`, and `_build_prompt()` helpers — tool execution is now
-  handled by the MCP server; the agent run loop no longer needs to intercept and
-  re-submit tool calls
-- The `run()` method simplifies to a single Responses API call (no tool call loop),
-  since MCP tool execution is handled transparently by the Foundry runtime
-- SSE event emission for `action_tool_call` and `action_tool_result` must be
-  reconsidered: if the Foundry runtime handles MCP calls opaquely, these events may
-  need to come from response metadata rather than from an intercepted tool call loop —
-  confirm what the Responses API returns for MCP tool invocations before implementing
-- The local `/tools/refi_calculator.py` and `/tools/appointment_scheduler.py` files
-  become the reference implementation for the Function App, but are no longer imported
-  by `action_agent.py`
-- Update `requirements.txt` if new MCP-specific SDK dependencies are needed
-- Update the mock stream in `useAgentStream.js` if the event structure changes
+**MCP server deployment:**
+```bash
+cd mcp-server
+func azure functionapp publish <app-name>
+```
+MCP endpoint is at `/mcp` (not `/api/mcp`) due to `routePrefix: ""` in `host.json`.
+The Function App uses `AuthLevel.ANONYMOUS` — no auth key required.
+
+**Note on ASGI:** The `mcp` Python package's `AsgiFunctionApp(asgi_app=...)` constructor
+is not supported on Python 3.13 Flex Consumption. The MCP JSON-RPC protocol is implemented
+directly using a standard `FunctionApp` HTTP trigger instead.

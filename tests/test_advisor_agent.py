@@ -203,14 +203,3 @@ class TestAdvisorAgentInitialize:
         assert mcp_tool.allowed_tools == ["knowledge_base_retrieve"]
         assert mcp_tool.require_approval == "never"
 
-    async def test_reuses_existing_agent(self):
-        agent, project_client = make_agent_with_mock_client()
-
-        existing = MagicMock()
-        existing.versions.latest.version = "existing-version-99"
-        project_client.agents.get = AsyncMock(return_value=existing)
-
-        await agent.initialize()
-
-        project_client.agents.create_version.assert_not_called()
-        assert agent._agent_version == "existing-version-99"

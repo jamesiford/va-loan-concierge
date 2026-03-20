@@ -34,7 +34,6 @@ from urllib.parse import urlparse
 import requests
 from azure.ai.projects.aio import AIProjectClient
 from azure.ai.projects.models import MCPTool, PromptAgentDefinition
-from azure.core.exceptions import ResourceNotFoundError
 from azure.identity import DefaultAzureCredential as SyncCredential
 from azure.identity import get_bearer_token_provider
 from azure.identity.aio import DefaultAzureCredential
@@ -167,30 +166,17 @@ class AdvisorAgent:
 
     async def initialize(self) -> None:
         """
-        Provision the MCP connection and register the Foundry agent.
+        Provision the MCP connection and register a new Foundry agent version.
 
         Steps:
           1. Create/update the RemoteTool project connection via ARM.
-          2. Reuse the latest existing agent version, or create a new one.
+          2. Always create a new agent version (increments version counter in portal).
         """
         # Connection provisioning is a sync ARM call — run in a thread.
         await asyncio.to_thread(self._create_or_update_connection)
 
         project_client = self._get_project_client()
         model = os.environ["MODEL_DEPLOYMENT_NAME"]
-
-        # Reuse existing agent version if available.
-        try:
-            existing = await project_client.agents.get(_AGENT_NAME)
-            self._agent_version = existing.versions.latest.version
-            logger.info(
-                "advisor_agent: reusing existing Foundry agent '%s' version=%s",
-                _AGENT_NAME,
-                self._agent_version,
-            )
-            return
-        except ResourceNotFoundError:
-            logger.debug("advisor_agent: no existing agent — will create new version")
 
         connection_name = os.environ["MCP_CONNECTION_NAME"]
         mcp_tool = MCPTool(

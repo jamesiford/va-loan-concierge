@@ -3,9 +3,6 @@
 # ── Azure AI Foundry (unified SDK: project client, agents, evaluations) ──────
 azure-ai-projects>=2.0.1
 
-# ── Azure AI Agent Framework (create/manage agents that surface in Foundry portal) ──
-azure-ai-agents>=1.1.0
-
 # ── Authentication ────────────────────────────────────────────────────────────
 azure-identity>=1.25.0
 

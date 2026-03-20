@@ -2,19 +2,18 @@
 Tests for ActionAgent.
 
 Covers:
-  - _execute_tool_call dispatch and output correctness
-  - _build_prompt parameter injection
-  - Event formatters (_refi_event_inputs, _appt_event_inputs)
+  - _format_tool_result output for refi and appointment tools
+  - _parse_mcp_events extraction from response.output
   - run() event sequence and error paths
+  - initialize() agent creation and reuse
 """
 
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+from azure.core.exceptions import ResourceNotFoundError
 
 from agents.action_agent import ActionAgent
-from tools.refi_calculator import RefiCalculatorInput
-from tools.appointment_scheduler import AppointmentInput
 from tests.conftest import make_action_mock_client
 
 
@@ -30,168 +29,142 @@ def make_agent(response_text: str = "Your savings: $142/month.") -> tuple[Action
     return agent, mock_client
 
 
-async def collect_events(agent: ActionAgent, query: str, refi=None, appt=None) -> list[dict]:
-    return [e async for e in agent.run(query, refi, appt)]
-
-
-DEMO_REFI = RefiCalculatorInput(
-    current_rate=6.8,
-    new_rate=6.1,
-    balance=320_000,
-    remaining_term=27,
-    funding_fee_exempt=True,
-)
-
-DEMO_APPT = AppointmentInput(
-    preferred_day="Thursday",
-    preferred_time="2:00 PM",
-)
+async def collect_events(agent: ActionAgent, query: str) -> list[dict]:
+    return [e async for e in agent.run(query)]
 
 
 # ---------------------------------------------------------------------------
-# _execute_tool_call
+# _format_tool_result
 # ---------------------------------------------------------------------------
 
-class TestExecuteToolCall:
+class TestFormatToolResult:
     def setup_method(self):
         self.agent = ActionAgent()
 
-    def test_refi_calculator_exempt_passes_benefit_test(self):
-        args = json.dumps({
-            "current_rate": 6.8,
-            "new_rate": 6.1,
-            "balance": 320_000,
-            "remaining_term": 27,
-            "funding_fee_exempt": True,
-        })
-        msg, output_json = self.agent._execute_tool_call("refi_savings_calculator", args)
-        result = json.loads(output_json)
-
-        assert result["monthly_savings"] > 0
-        assert result["is_beneficial"] is True
-        assert result["break_even_months"] <= 36
-        assert "passes" in msg.lower() or "✓" in msg
-
-    def test_refi_calculator_non_exempt_higher_closing_costs(self):
-        exempt_args = json.dumps({
-            "current_rate": 6.8, "new_rate": 6.1,
-            "balance": 320_000, "remaining_term": 27,
-            "funding_fee_exempt": True,
-        })
-        non_exempt_args = json.dumps({
-            "current_rate": 6.8, "new_rate": 6.1,
-            "balance": 320_000, "remaining_term": 27,
-            "funding_fee_exempt": False,
-        })
-        _, exempt_json = self.agent._execute_tool_call("refi_savings_calculator", exempt_args)
-        _, non_exempt_json = self.agent._execute_tool_call("refi_savings_calculator", non_exempt_args)
-
-        exempt_result = json.loads(exempt_json)
-        non_exempt_result = json.loads(non_exempt_json)
-
-        assert non_exempt_result["closing_costs"] > exempt_result["closing_costs"]
-        assert non_exempt_result["break_even_months"] > exempt_result["break_even_months"]
-
-    def test_appointment_scheduler_returns_confirmation(self):
-        args = json.dumps({
-            "preferred_day": "Thursday",
-            "preferred_time": "2:00 PM",
-        })
-        msg, output_json = self.agent._execute_tool_call("appointment_scheduler", args)
-        result = json.loads(output_json)
-
-        assert "Thursday" in result["confirmed_day"]
-        assert result["confirmation_number"].startswith("LOAN-")
-        assert "LOAN-" in msg
-
-    def test_appointment_scheduler_normalizes_day(self):
-        args = json.dumps({
-            "preferred_day": "thurs",
-            "preferred_time": "afternoon",
-        })
-        _, output_json = self.agent._execute_tool_call("appointment_scheduler", args)
-        result = json.loads(output_json)
-        assert result["confirmed_day"] == "Thursday"
-
-    def test_unknown_tool_raises_value_error(self):
-        with pytest.raises(ValueError, match="unknown tool"):
-            self.agent._execute_tool_call("nonexistent_tool", "{}")
-
-    def test_refi_result_message_contains_key_metrics(self):
-        args = json.dumps({
-            "current_rate": 6.8, "new_rate": 6.1,
-            "balance": 320_000, "remaining_term": 27,
-            "funding_fee_exempt": True,
-        })
-        msg, _ = self.agent._execute_tool_call("refi_savings_calculator", args)
+    def test_refi_result_contains_key_metrics(self):
+        data = {
+            "monthly_savings": 142.50,
+            "annual_savings": 1710.0,
+            "break_even_months": 29,
+            "is_beneficial": True,
+        }
+        msg = self.agent._format_tool_result("refi_savings_calculator", json.dumps(data))
         assert "Monthly savings" in msg
-        assert "Break-even" in msg
         assert "Annual savings" in msg
+        assert "Break-even" in msg
+        assert "29 months" in msg
+
+    def test_refi_result_passes_benefit_test(self):
+        data = {"monthly_savings": 142.50, "annual_savings": 1710.0,
+                "break_even_months": 29, "is_beneficial": True}
+        msg = self.agent._format_tool_result("refi_savings_calculator", json.dumps(data))
+        assert "✓ passes" in msg
+
+    def test_refi_result_fails_benefit_test(self):
+        data = {"monthly_savings": 50.0, "annual_savings": 600.0,
+                "break_even_months": 40, "is_beneficial": False}
+        msg = self.agent._format_tool_result("refi_savings_calculator", json.dumps(data))
+        assert "✗ fails" in msg
+
+    def test_appointment_result_contains_key_fields(self):
+        data = {
+            "confirmed_day": "Thursday",
+            "calendar_date": "Thu Mar 26, 2026",
+            "confirmed_time": "2:00 PM",
+            "loan_officer": "Sarah Chen",
+            "confirmation_number": "LOAN-84921",
+        }
+        msg = self.agent._format_tool_result("appointment_scheduler", json.dumps(data))
+        assert "Thursday" in msg
+        assert "Sarah Chen" in msg
+        assert "LOAN-84921" in msg
+
+    def test_unknown_tool_returns_fallback(self):
+        msg = self.agent._format_tool_result("unknown_tool", json.dumps({"result": "ok"}))
+        # Should not raise; returns something non-empty
+        assert msg
+
+    def test_malformed_json_returns_fallback(self):
+        msg = self.agent._format_tool_result("refi_savings_calculator", "not-json")
+        assert msg  # Should not raise
 
 
 # ---------------------------------------------------------------------------
-# _build_prompt
+# _parse_mcp_events
 # ---------------------------------------------------------------------------
 
-class TestBuildPrompt:
+class TestParseMcpEvents:
     def setup_method(self):
         self.agent = ActionAgent()
 
-    def test_no_inputs_returns_query_only(self):
-        result = self.agent._build_prompt("How much would I save?", None, None)
-        assert result == "How much would I save?"
+    def _make_response(self, items):
+        r = MagicMock()
+        r.output = items
+        return r
 
-    def test_refi_input_includes_rates(self):
-        result = self.agent._build_prompt("Calculate savings", DEMO_REFI, None)
-        assert "6.8" in result
-        assert "6.1" in result
-        assert str(DEMO_REFI.balance) in result
+    def test_single_mcp_call_yields_two_events(self):
+        item = MagicMock()
+        item.type = "mcp_call"
+        item.name = "refi_savings_calculator"
+        item.input = {"current_rate": 6.8, "new_rate": 6.1, "balance": 320000,
+                      "remaining_term": 27, "funding_fee_exempt": True}
+        item.output = json.dumps({"monthly_savings": 142.5, "annual_savings": 1710.0,
+                                   "break_even_months": 29, "is_beneficial": True})
 
-    def test_appt_input_includes_day(self):
-        result = self.agent._build_prompt("Book a call", None, DEMO_APPT)
-        assert "Thursday" in result
-        assert "2:00 PM" in result
+        events = self.agent._parse_mcp_events(self._make_response([item]))
+        assert len(events) == 2
+        assert events[0]["type"] == "action_tool_call"
+        assert events[1]["type"] == "action_tool_result"
 
-    def test_both_inputs_included(self):
-        result = self.agent._build_prompt("Refinance and book", DEMO_REFI, DEMO_APPT)
-        assert "6.8" in result
-        assert "Thursday" in result
+    def test_tool_call_event_carries_name_and_inputs(self):
+        item = MagicMock()
+        item.type = "mcp_call"
+        item.name = "refi_savings_calculator"
+        item.input = {"current_rate": 6.8}
+        item.output = "{}"
 
-    def test_funding_fee_exempt_flag_present(self):
-        result = self.agent._build_prompt("Save money", DEMO_REFI, None)
-        assert "funding_fee_exempt" in result
+        events = self.agent._parse_mcp_events(self._make_response([item]))
+        assert events[0]["message"] == "refi_savings_calculator"
+        assert events[0]["inputs"] == {"current_rate": 6.8}
 
+    def test_two_mcp_calls_yield_four_events(self):
+        def _item(name):
+            i = MagicMock()
+            i.type = "mcp_call"
+            i.name = name
+            i.input = {}
+            i.output = "{}"
+            return i
 
-# ---------------------------------------------------------------------------
-# Event formatters
-# ---------------------------------------------------------------------------
+        items = [_item("refi_savings_calculator"), _item("appointment_scheduler")]
+        events = self.agent._parse_mcp_events(self._make_response(items))
+        assert len(events) == 4
+        call_names = [e["message"] for e in events if e["type"] == "action_tool_call"]
+        assert "refi_savings_calculator" in call_names
+        assert "appointment_scheduler" in call_names
 
-class TestEventFormatters:
-    def setup_method(self):
-        self.agent = ActionAgent()
-        # Get a real result to format.
-        args = json.dumps({
-            "current_rate": 6.8, "new_rate": 6.1,
-            "balance": 320_000, "remaining_term": 27,
-            "funding_fee_exempt": True,
-        })
-        _, self.refi_json = self.agent._execute_tool_call("refi_savings_calculator", args)
-        self.refi_result = json.loads(self.refi_json)
+    def test_non_mcp_call_items_ignored(self):
+        item = MagicMock()
+        item.type = "message"
+        events = self.agent._parse_mcp_events(self._make_response([item]))
+        assert events == []
 
-    def test_refi_event_inputs_structure(self):
-        inputs = self.agent._refi_event_inputs(DEMO_REFI)
-        assert "current_rate" in inputs
-        assert "new_rate" in inputs
-        assert "balance" in inputs
-        assert "remaining_term" in inputs
-        assert "funding_fee_exempt" in inputs
-        assert inputs["current_rate"] == 6.8
+    def test_empty_output_returns_empty_list(self):
+        r = MagicMock()
+        r.output = []
+        events = self.agent._parse_mcp_events(r)
+        assert events == []
 
-    def test_appt_event_inputs_structure(self):
-        inputs = self.agent._appt_event_inputs(DEMO_APPT)
-        assert "preferred_day" in inputs
-        assert "preferred_time" in inputs
-        assert inputs["preferred_day"] == "Thursday"
+    def test_json_string_input_parsed_to_dict(self):
+        item = MagicMock()
+        item.type = "mcp_call"
+        item.name = "refi_savings_calculator"
+        item.input = json.dumps({"current_rate": 6.8, "new_rate": 6.1})
+        item.output = "{}"
+
+        events = self.agent._parse_mcp_events(self._make_response([item]))
+        assert isinstance(events[0]["inputs"], dict)
+        assert events[0]["inputs"]["current_rate"] == 6.8
 
 
 # ---------------------------------------------------------------------------
@@ -201,12 +174,12 @@ class TestEventFormatters:
 class TestActionAgentRun:
     async def test_first_event_is_action_start(self):
         agent, _ = make_agent()
-        events = await collect_events(agent, "Calculate my savings", DEMO_REFI)
+        events = await collect_events(agent, "Calculate my savings")
         assert events[0]["type"] == "action_start"
 
     async def test_tool_call_event_emitted(self):
         agent, _ = make_agent()
-        events = await collect_events(agent, "Calculate my savings", DEMO_REFI)
+        events = await collect_events(agent, "Calculate my savings")
         call_events = [e for e in events if e["type"] == "action_tool_call"]
         assert len(call_events) >= 1
         assert call_events[0]["message"] == "refi_savings_calculator"
@@ -214,19 +187,26 @@ class TestActionAgentRun:
 
     async def test_tool_result_event_emitted(self):
         agent, _ = make_agent()
-        events = await collect_events(agent, "Calculate my savings", DEMO_REFI)
+        events = await collect_events(agent, "Calculate my savings")
         result_events = [e for e in events if e["type"] == "action_tool_result"]
         assert len(result_events) >= 1
 
     async def test_action_text_event_is_last(self):
         agent, _ = make_agent()
-        events = await collect_events(agent, "Calculate my savings", DEMO_REFI)
+        events = await collect_events(agent, "Calculate my savings")
         assert events[-1]["type"] == "_action_text"
+
+    async def test_action_text_contains_response(self):
+        response = "Your monthly savings are $142.50. Break-even: 29 months."
+        agent, _ = make_agent(response_text=response)
+        events = await collect_events(agent, "Calculate my savings")
+        text_event = next(e for e in events if e["type"] == "_action_text")
+        assert text_event["text"] == response
 
     async def test_event_order(self):
         """action_start → action_tool_call → action_tool_result → _action_text"""
         agent, _ = make_agent()
-        events = await collect_events(agent, "Calculate my savings", DEMO_REFI)
+        events = await collect_events(agent, "Calculate my savings")
         types = [e["type"] for e in events]
 
         assert types[0] == "action_start"
@@ -237,55 +217,83 @@ class TestActionAgentRun:
         text_idx = types.index("_action_text")
         assert call_idx < result_idx < text_idx
 
-    async def test_no_inputs_emits_error(self):
-        agent, _ = make_agent()
-        events = await collect_events(agent, "Tell me something", None, None)
-        assert any(e["type"] == "error" for e in events)
-        # Should not emit action_start before the error.
-        assert not any(e["type"] == "action_tool_call" for e in events)
-
     async def test_failed_run_emits_error(self):
-        """If the Responses API raises, an error event should be yielded."""
         agent, mock_client = make_agent()
         openai_client = mock_client.get_openai_client()
         openai_client.responses.create = AsyncMock(side_effect=Exception("model_error"))
 
-        events = await collect_events(agent, "Calculate savings", DEMO_REFI)
+        events = await collect_events(agent, "Calculate savings")
         assert any(e["type"] == "error" for e in events)
 
-    async def test_action_text_contains_response(self):
-        response = "Your monthly savings are $142.00. Break-even: 29 months."
-        agent, _ = make_agent(response_text=response)
-        events = await collect_events(agent, "Calculate savings", DEMO_REFI)
-        text_event = next(e for e in events if e["type"] == "_action_text")
-        assert text_event["text"] == response
-
-    async def test_appointment_tool_call_emitted(self):
-        """When an appointment is requested, appointment_scheduler tool call is emitted."""
+    async def test_no_mcp_calls_still_completes(self):
+        """If the agent returns no mcp_call items, _action_text is still emitted."""
         agent, mock_client = make_agent()
         openai_client = mock_client.get_openai_client()
+        response = MagicMock()
+        response.output = []
+        response.output_text = "I couldn't process that request."
+        openai_client.responses.create = AsyncMock(return_value=response)
 
-        # Override Responses API to return an appointment_scheduler function_call.
-        tc = MagicMock()
-        tc.type = "function_call"
-        tc.name = "appointment_scheduler"
-        tc.arguments = json.dumps({
-            "preferred_day": "Thursday",
-            "preferred_time": "2:00 PM",
-        })
-        tc.call_id = "call-appt"
+        events = await collect_events(agent, "Hello")
+        assert events[-1]["type"] == "_action_text"
+        assert not any(e["type"] == "action_tool_call" for e in events)
 
-        response1 = MagicMock()
-        response1.output = [tc]
-        response1.output_text = None
-        response1.id = "resp-appt-1"
+    async def test_no_agent_version_triggers_initialize(self):
+        agent, mock_client = make_agent()
+        agent._agent_version = None
+        agent._create_or_update_connection = lambda: None
 
-        response2 = MagicMock()
-        response2.output = []
-        response2.output_text = "Appointment confirmed for Thursday."
+        events = await collect_events(agent, "Calculate my savings")
+        assert agent._agent_version == "1"
+        assert any(e["type"] == "_action_text" for e in events)
 
-        openai_client.responses.create = AsyncMock(side_effect=[response1, response2])
 
-        events = await collect_events(agent, "Book a call for Thursday", None, DEMO_APPT)
-        call_events = [e for e in events if e["type"] == "action_tool_call"]
-        assert any(e["message"] == "appointment_scheduler" for e in call_events)
+# ---------------------------------------------------------------------------
+# initialize() — agent creation and reuse
+# ---------------------------------------------------------------------------
+
+class TestActionAgentInitialize:
+    async def test_creates_agent_when_none_exists(self):
+        agent = ActionAgent()
+        mock_client = make_action_mock_client()
+        agent._get_client = lambda: mock_client
+        agent._create_or_update_connection = lambda: None
+        await agent.initialize()
+        mock_client.agents.create_version.assert_called_once()
+        assert agent._agent_version == "1"
+
+    async def test_create_version_uses_mcp_tool(self):
+        from azure.ai.projects.models import MCPTool
+        agent = ActionAgent()
+        mock_client = make_action_mock_client()
+        agent._get_client = lambda: mock_client
+        agent._create_or_update_connection = lambda: None
+        await agent.initialize()
+        call_kwargs = mock_client.agents.create_version.call_args.kwargs
+        definition = call_kwargs["definition"]
+        assert any(isinstance(t, MCPTool) for t in definition.tools)
+
+    async def test_mcp_tool_references_mcp_endpoint(self, monkeypatch):
+        from azure.ai.projects.models import MCPTool
+        monkeypatch.setenv("MCP_ENDPOINT", "https://test-mcp.azurewebsites.net/mcp")
+        agent = ActionAgent()
+        mock_client = make_action_mock_client()
+        agent._get_client = lambda: mock_client
+        agent._create_or_update_connection = lambda: None
+        await agent.initialize()
+        call_kwargs = mock_client.agents.create_version.call_args.kwargs
+        mcp_tool = next(t for t in call_kwargs["definition"].tools if isinstance(t, MCPTool))
+        assert mcp_tool.server_url == "https://test-mcp.azurewebsites.net/mcp"
+        assert set(mcp_tool.allowed_tools) == {"refi_savings_calculator", "appointment_scheduler"}
+        assert mcp_tool.require_approval == "never"
+        assert mcp_tool.project_connection_id == "va-loan-action-test-conn"
+
+    async def test_arm_connection_called_on_initialize(self):
+        agent = ActionAgent()
+        mock_client = make_action_mock_client()
+        agent._get_client = lambda: mock_client
+        called = []
+        agent._create_or_update_connection = lambda: called.append(True)
+        await agent.initialize()
+        assert called, "_create_or_update_connection should be called during initialize()"
+

@@ -16,6 +16,7 @@ os.environ.setdefault("KNOWLEDGE_BASE_NAME", "kb-va-loan-test")
 os.environ.setdefault("AZURE_AI_SEARCH_ENDPOINT", "https://test-search.search.windows.net")
 os.environ.setdefault("PROJECT_RESOURCE_ID", "/subscriptions/00000000/resourceGroups/rg-test/providers/Microsoft.CognitiveServices/accounts/test/projects/test-proj")
 os.environ.setdefault("MCP_CONNECTION_NAME", "kb-va-loan-test-mcp")
+os.environ.setdefault("MCP_ACTION_CONNECTION_NAME", "va-loan-action-test-conn")
 
 
 # ---------------------------------------------------------------------------
@@ -80,10 +81,8 @@ def make_action_mock_client(
     """
     Build a mock AIProjectClient for ActionAgent.
 
-    Simulates one requires-action cycle for refi_savings_calculator:
-      - First Responses API call returns a function_call item.
-      - Second Responses API call (after tool output submission) returns
-        the final text response.
+    Simulates a single Responses API call that returns one mcp_call item
+    for refi_savings_calculator (Foundry handles MCP execution server-side).
     """
     client = MagicMock()
 
@@ -93,33 +92,36 @@ def make_action_mock_client(
     version_obj.version = "1"
     client.agents.create_version = AsyncMock(return_value=version_obj)
 
-    # Responses API.
+    # Responses API — single call with one mcp_call item in output.
     openai_client = MagicMock()
 
-    # First response: one refi_savings_calculator function_call.
-    tc = MagicMock()
-    tc.type = "function_call"
-    tc.name = "refi_savings_calculator"
-    tc.arguments = json.dumps({
+    mcp_call = MagicMock()
+    mcp_call.type = "mcp_call"
+    mcp_call.name = "refi_savings_calculator"
+    mcp_call.input = {
         "current_rate": 6.8,
         "new_rate": 6.1,
         "balance": 320000,
         "remaining_term": 27,
         "funding_fee_exempt": True,
+    }
+    mcp_call.output = json.dumps({
+        "current_monthly_payment": 2243.17,
+        "new_monthly_payment": 2100.67,
+        "monthly_savings": 142.50,
+        "annual_savings": 1710.0,
+        "break_even_months": 29,
+        "break_even_years": 2.4,
+        "lifetime_savings": 44196.0,
+        "closing_costs": 4050.0,
+        "is_beneficial": True,
     })
-    tc.call_id = "call-001"
 
-    response1 = MagicMock()
-    response1.output = [tc]
-    response1.output_text = None
-    response1.id = "resp-001"
+    response = MagicMock()
+    response.output = [mcp_call]
+    response.output_text = response_text
 
-    # Second response: no tool calls, final text.
-    response2 = MagicMock()
-    response2.output = []
-    response2.output_text = response_text
-
-    openai_client.responses.create = AsyncMock(side_effect=[response1, response2])
+    openai_client.responses.create = AsyncMock(return_value=response)
     client.get_openai_client = MagicMock(return_value=openai_client)
 
     return client
