@@ -27,7 +27,7 @@ export default function App() {
           <div>
             <div
               className="text-white text-base"
-              style={{ fontFamily: "'DM Serif Display', serif", letterSpacing: '0.01em' }}
+              style={{ fontFamily: "'Poppins', sans-serif", fontWeight: 400, letterSpacing: '0.01em' }}
             >
               VA Loan Concierge
             </div>
@@ -35,7 +35,7 @@ export default function App() {
               className="text-xs uppercase"
               style={{ color: '#93A8C0', letterSpacing: '0.06em' }}
             >
-              Multi-Agent Demo
+              Multi-Agent Demo · Foundry IQ &amp; Custom MCP Server
             </div>
           </div>
         </div>
