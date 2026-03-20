@@ -293,6 +293,12 @@ va-loan-concierge/
 │   ├── lender_products.md       # Knowledge source 2: Lender loan products
 │   └── loan_process_faq.md      # Knowledge source 3: Borrower FAQ and edge cases
 │
+├── mcp-server/                  # Azure Function App — custom MCP server
+│   ├── function_app.py          # HTTP trigger: MCP JSON-RPC handler (initialize/tools/list/tools/call)
+│   ├── server.py                # Tool implementations + MCP inputSchema definitions
+│   ├── host.json                # routePrefix: "" → endpoint at /mcp (not /api/mcp)
+│   └── requirements.txt         # azure-functions only — no mcp package needed
+│
 ├── ui/                          # React frontend
 │   ├── package.json
 │   ├── vite.config.js           # Vite dev server; proxies /api to FastAPI on :8000
@@ -300,9 +306,10 @@ va-loan-concierge/
 │   ├── index.html
 │   └── src/
 │       ├── main.jsx
-│       ├── App.jsx              # Root layout: header + two-panel split
+│       ├── App.jsx              # Root layout: header + profile bar + two-panel split
 │       ├── index.css            # Tailwind directives + CSS custom properties
 │       ├── components/
+│       │   ├── BorrowerProfile.jsx # Profile selector pills + collapsible detail card
 │       │   ├── ChatPanel.jsx    # Conversation message thread
 │       │   ├── ChatMessage.jsx  # Individual message bubble (user or concierge)
 │       │   ├── ChatInput.jsx    # Prompt textarea + send button + demo query buttons
@@ -310,9 +317,10 @@ va-loan-concierge/
 │       │   ├── FlowEvent.jsx    # Single log row with icon, label, message
 │       │   └── StatusDot.jsx    # Header connection/activity indicator
 │       └── hooks/
-│           └── useAgentStream.js # Custom hook: manages SSE connection + event state
+│           └── useAgentStream.js # SSE connection, mock mode, profile_id injection
 │
 └── tests/
+    ├── conftest.py
     ├── test_advisor_agent.py
     ├── test_action_agent.py
     └── test_orchestrator.py
@@ -328,9 +336,9 @@ va-loan-concierge/
 |---|---|
 | Language | Python 3.11+ |
 | API Server | `FastAPI` + `uvicorn` — serves SSE stream to UI |
-| Foundry SDK | `azure-ai-projects >= 2.0.0b4` (new Foundry API — NOT classic) |
+| Foundry SDK | `azure-ai-projects >= 2.0.1` (new-agent API — NOT classic) |
 | Authentication | `azure-identity` (`DefaultAzureCredential`) |
-| MCP | `azure-ai-projects` MCP client + cloud-hosted MCP at `mcp.ai.azure.com` |
+| MCP | `azure-ai-projects` MCPTool + custom Azure Function App (`mcp-server/`) |
 | Env management | `python-dotenv` |
 | Testing | `pytest` |
 
@@ -356,7 +364,7 @@ va-loan-concierge/
 - **Type hints required** on all function signatures
 - Each agent is a self-contained class in its own file under `/agents/`
 - Environment variables are always loaded via `python-dotenv` at the top of `main.py`
-- MCP tool inputs and outputs use **typed dataclasses** — no raw dict passing between agents
+- MCP tool inputs and outputs use plain dicts — the MCP server returns JSON; agents parse `response.output`
 - Knowledge base documents are plain Markdown in `/knowledge/` for readability and easy updating
 - Never hardcode endpoint URLs, model names, or credentials — always from `.env`
 - Use `logging` (not `print`) for all runtime output except the final user-facing response
@@ -436,39 +444,29 @@ The default `python main.py` run executes the flagship demo query:
 
 ---
 
-## UI Reference Prototype
+## Borrower Profiles
 
-The file `va-loan-concierge-ui.jsx` in the project root is a **fully working UI prototype**
-that defines the exact target design and behavior for the frontend. It is a self-contained
-single-file reference — NOT the production implementation.
+`DEMO_PROFILES` in `main.py` defines three demo borrowers. The profile flows from the UI
+through `useAgentStream.js` → `POST /api/chat` (`profile_id` field on `ChatRequest`) →
+`Orchestrator.run(query, profile_id)`.
 
-When building the `ui/` frontend, Claude Code must:
-- **Match the visual design exactly** — colors, layout, typography, spacing, component
-  structure, and animations as implemented in the prototype
-- **Replicate all behaviors** — streaming event rendering, auto-scroll, tool call expansion,
-  demo query buttons, responsive panel toggle, pulsing indicators, fade-in animations
-- **Use the same color values** — the `colors` object in the prototype is the source of
-  truth; map these directly to the CSS custom properties in `index.css`
-- **Preserve the event type handling** — the `EVENT_CONFIG` map in the prototype defines
-  icons, labels, and colors for every SSE event type; replicate this in `FlowEvent.jsx`
-- **Keep the simulated stream logic** — the `buildStream()` function in the prototype
-  defines the demo query scenarios and event sequences; port this into `useAgentStream.js`
-  as the fallback/mock mode, switchable via a `VITE_MOCK_MODE=true` env variable
+**Context injection rules (important):**
+- `_profile_context_block(profile_id)` — prepends borrower service history and loan details
+  to every agent query. When `profile_id` is `None`, prepends a note telling agents to ask
+  for personal details conversationally.
+- `_demo_context_block(query, profile_id)` — appends tool parameters for the Action Agent:
+  - **Refi calc params** (balance, current_rate, new_rate, etc.) → ALWAYS inject from
+    profile — the user never types these out and the agent cannot know them otherwise.
+  - **Appointment day/time** → NEVER inject. The agent extracts these from the user's
+    own words. Injecting hardcoded values overrides what the user asked for.
+  - If `current_rate` is `None` (first-time buyer, no existing loan), skip the refi block
+    and inject a note that IRRRL requires an existing VA loan.
 
-The prototype may be deleted once the `ui/` implementation is complete and verified to
-match it visually and behaviorally.
-```
-
-**When to invoke it with Claude Code:**
-
-Don't reference it during the scaffold or knowledge/agent phases — it's only relevant when you get to the frontend. When you're ready to build the UI, use this prompt:
-
-> *"Read `va-loan-concierge-ui.jsx` in the project root. This is the reference prototype for the frontend. Now implement the `ui/` folder — build each component in `ui/src/components/` to match the prototype exactly, split across the individual files defined in CLAUDE.md. Port `buildStream()` into `useAgentStream.js` as mock mode."*
-
-**One more thing to add to `.gitignore`:**
-```
-# Reference prototype — not part of the build
-va-loan-concierge-ui.jsx
+| Profile | Key scenario |
+|---|---|
+| `marcus` | Army Veteran, 10% disability (fee exempt), existing VA loan at 6.8% — IRRRL flagship |
+| `sarah` | Navy Veteran, first-time buyer, no existing loan — purchase eligibility, no refi calc |
+| `james` | Active duty, OCONUS deployed, second VA loan use — higher balance, no fee exemption |
 
 ---
 
