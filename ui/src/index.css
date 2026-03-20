@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-brand-red:    #C8102E;
+  --color-brand-navy:   #002244;
+  --color-brand-gold:   #B8941F;
+  --color-surface:      #F8F7F4;
+  --color-panel:        #FFFFFF;
+  --color-border:       #E5E2DC;
+  --color-advisor:      #92400E;
+  --color-action:       #1E40AF;
+  --color-orchestrator: #4338CA;
+  --color-success:      #15803D;
+  --color-muted:        #6B7280;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--color-surface);
+  color: #1F2937;
+  min-height: 100vh;
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1); opacity: 0.5; }
+  50%       { transform: scale(1.4); opacity: 1; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+textarea:focus { outline: none; }
+textarea { resize: none; }
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
+
+.send-btn:hover { background: #001a33 !important; }
+.demo-btn:hover {
+  background: var(--color-surface) !important;
+  border-color: var(--color-brand-navy) !important;
+  color: var(--color-brand-navy) !important;
+}
+
+.flow-event {
+  animation: fadeSlideIn 0.25s ease forwards;
+  opacity: 0;
+}

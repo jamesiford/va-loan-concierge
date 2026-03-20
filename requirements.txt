@@ -1,0 +1,22 @@
+# VA Loan Concierge — Python dependencies
+
+# ── Azure AI Foundry (unified SDK: project client, agents, evaluations) ──────
+azure-ai-projects>=2.0.1
+
+# ── Azure AI Agent Framework (create/manage agents that surface in Foundry portal) ──
+azure-ai-agents>=1.1.0
+
+# ── Authentication ────────────────────────────────────────────────────────────
+azure-identity>=1.25.0
+
+# ── Backend server ────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.29.0
+
+# ── Environment management ────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+httpx>=0.27.0
