@@ -1,6 +1,10 @@
 # VA Loan Concierge
 
-A multi-agent demo for a VA mortgage lender built on **Microsoft Azure AI Foundry**. The application showcases two distinct Foundry capabilities — **Foundry IQ** (grounded knowledge-base RAG) and **MCP** (live tool invocation via a custom Azure Function) — working together in a real-time, streaming agent workflow.
+A multi-agent demo for a VA mortgage lender built on **Microsoft Azure AI Foundry**. The application showcases two distinct Foundry capabilities — **Foundry IQ** (grounded knowledge-base RAG) and **MCP** (live tool invocation via a custom Azure Function) — working together in a coordinated agent workflow.
+
+Two orchestration paths share the same sub-agents:
+- **React UI demo** — Python backend with real-time SSE streaming and an Agent Flow Log
+- **Copilot Studio / Teams** — Foundry Workflow Agent (declarative YAML, no container needed)
 
 ---
 
@@ -67,6 +71,7 @@ A Veteran borrower interacts with a single chat interface. A single query like:
 | Orchestrator | `va-loan-orchestrator` | New Foundry agent (Responses API) | LLM-driven routing — classifies each query and decides which agent(s) to invoke |
 | VA Loan Advisor | `va-loan-advisor-iq` | Foundry IQ via MCPTool | Answers eligibility, product, and process questions grounded in 3 knowledge sources |
 | Loan Action Agent | `va-loan-action-mcp` | Custom MCP via MCPTool | Runs refinance calculations and books appointments via Azure-hosted MCP tools |
+| Workflow | `va-loan-concierge-workflow` | Foundry Workflow Agent | Declarative orchestration for Copilot Studio / Teams (routes to advisor + action) |
 
 ---
 
@@ -170,6 +175,8 @@ When no profile is selected, agents are instructed to gather personal details co
 va-loan-concierge/
 ├── main.py                      # Thin CLI entry point — imports Orchestrator + profiles
 ├── profiles.py                  # DEMO_PROFILES + context injection helpers
+├── workflow.yaml                # Foundry Workflow Agent definition (Copilot Studio / Teams)
+├── deploy_workflow.py           # Registers sub-agents + uploads workflow to Foundry
 ├── requirements.txt
 │
 ├── agents/
@@ -223,7 +230,6 @@ va-loan-concierge/
 - Node.js 18+
 - Azure CLI — `az` must be on your PATH
 - [Azure Functions Core Tools](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local) v4+ — only needed to deploy the MCP server
-- Docker — only needed for the containerized backend
 - An Azure AI Foundry project with:
   - A model deployment (e.g. `gpt-4.1`)
   - A Foundry IQ Knowledge Base (Azure AI Search-backed index)
@@ -250,11 +256,6 @@ MCP_CONNECTION_NAME=kb-va-loan-demo-mcp
 # Custom MCP Server / Azure Function App (Action Agent)
 MCP_ENDPOINT=https://<function-app>.azurewebsites.net/mcp
 MCP_ACTION_CONNECTION_NAME=va-loan-action-mcp-conn
-
-# Service principal — only needed when running inside Docker locally (see below)
-AZURE_TENANT_ID=
-AZURE_CLIENT_ID=
-AZURE_CLIENT_SECRET=
 ```
 
 ---
@@ -337,76 +338,20 @@ func azure functionapp publish <your-function-app-name>
 
 ---
 
-### 5. Run with Docker (Local)
+### 5. Deploy the Workflow Agent (Copilot Studio / Teams)
 
-Running inside Docker means there is no `az` binary in the container, so `az login` credentials can't be used. Instead, authenticate via a **service principal** — `DefaultAzureCredential` picks up the credentials automatically via `EnvironmentCredential` when the three `AZURE_*` variables are set.
-
-#### Step 1 — Create or retrieve a service principal (one-time setup)
+The workflow agent provides a second orchestration path — declarative, no container needed. It uses the same sub-agents as the Python backend.
 
 ```bash
-# Always authenticate first
 az login
-
-# Check if a service principal already exists before creating a new one.
-# (az ad sp create-for-rbac creates a duplicate if run again with the same name —
-#  display names are not unique in Entra ID)
-az ad sp list --display-name va-loan-concierge-local \
-  --query "[].{Name:displayName, AppId:appId}" -o table
+python deploy_workflow.py
 ```
 
-**If a service principal already exists**, the secret is not retrievable — generate a new one:
-```bash
-az ad app credential reset --id <AppId>
-# Outputs a new password → use as AZURE_CLIENT_SECRET
-```
+This registers all three sub-agents (orchestrator, advisor, action) and uploads `workflow.yaml` as a `WorkflowAgentDefinition`.
 
-Get your tenant ID:
-```bash
-az account show --query tenantId -o tsv
-```
+Test in the Foundry portal: **Build → Agents → va-loan-concierge-workflow → Playground**
 
-**If no service principal exists**, create one:
-```bash
-az ad sp create-for-rbac \
-  --name va-loan-concierge-local \
-  --role Contributor \
-  --scopes /subscriptions/<AZURE_SUBSCRIPTION_ID>
-```
-
-Output (both paths produce the same three values you need):
-```json
-{
-  "appId":       "...",   ← AZURE_CLIENT_ID
-  "password":    "...",   ← AZURE_CLIENT_SECRET
-  "tenant":      "..."    ← AZURE_TENANT_ID
-}
-```
-
-#### Step 2 — Add to `.env`
-
-```env
-AZURE_TENANT_ID=<tenant from above>
-AZURE_CLIENT_ID=<appId from above>
-AZURE_CLIENT_SECRET=<password from above>
-```
-
-#### Step 3 — Build and run
-
-```bash
-# Build the image
-docker build -t va-loan-concierge .
-
-# Run — passes all env vars (including service principal creds) from .env
-docker run --env-file .env -p 8000:8000 va-loan-concierge
-
-# Health check
-curl http://localhost:8000/api/health
-# → {"status":"ok","orchestrator_ready":true}
-```
-
-The UI still runs via `cd ui && npm run dev` on the host — Vite proxies `/api` to the container on port 8000.
-
-> **Note:** If `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` are set in `.env`, `DefaultAzureCredential` will use the service principal even when running outside Docker — `EnvironmentCredential` takes priority over `AzureCliCredential` in the credential chain. Comment those three lines out in `.env` when doing plain local dev with `az login`.
+> **Note:** Workflow agents are in preview. The deploy script injects the required `Foundry-Features: WorkflowAgents=V1Preview` header automatically.
 
 ---
 
@@ -421,7 +366,7 @@ These role assignments are required for the agents to access Azure services usin
 | Azure AI Search service | `Search Index Data Reader` | Foundry project managed identity | Advisor Agent KB queries |
 | Azure OpenAI resource | `Cognitive Services OpenAI User` | Search service managed identity | KB indexer skillset |
 
-> **Note:** `Contributor` alone is not sufficient for Foundry data plane operations (creating agents, calling the Responses API). `Azure AI Developer` is required in addition.
+> **Note:** `Contributor` alone is not sufficient for Foundry data plane operations (creating agents, calling the Responses API). `Azure AI User` is the correct role (not `Azure AI Developer`).
 
 The search service auth mode must be set to `aadOrApiKey` (not `apiKeyOnly`) — otherwise bearer token auth returns 403.
 
@@ -475,3 +420,4 @@ Or use the UI for the full streaming experience with the Agent Flow Log.
 | Real-time streaming | Every agent step streamed to the browser as SSE events |
 | Profile-aware responses | Borrower context injected per-query; calculator uses real loan parameters |
 | Governed, citable AI | Every factual claim traces back to a specific knowledge document |
+| Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams — same sub-agents, no container |
