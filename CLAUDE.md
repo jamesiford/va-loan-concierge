@@ -272,7 +272,10 @@ va-loan-concierge/
 ├── .gitignore                   # Excludes .env, __pycache__, .venv, node_modules
 ├── requirements.txt             # Python dependencies (backend)
 │
-├── main.py                      # Orchestrator entry point (CLI mode)
+├── main.py                      # CLI entry point — imports Orchestrator + profiles
+├── profiles.py                  # DEMO_PROFILES + _profile_context_block + _demo_context_block
+├── workflow.yaml                # Foundry Workflow Agent definition (orchestrator → advisor/action)
+├── deploy_workflow.py           # Registers sub-agents + uploads workflow to Foundry
 │
 ├── api/
 │   ├── __init__.py
@@ -280,6 +283,7 @@ va-loan-concierge/
 │
 ├── agents/
 │   ├── __init__.py
+│   ├── orchestrator_agent.py    # Orchestrator — LLM routing + sub-agent coordination
 │   ├── advisor_agent.py         # Foundry IQ / knowledge base agent
 │   └── action_agent.py          # MCP tools agent
 │
@@ -362,7 +366,7 @@ va-loan-concierge/
 
 - All agent calls are **async/await** throughout — no synchronous blocking calls
 - **Type hints required** on all function signatures
-- Each agent is a self-contained class in its own file under `/agents/`
+- Each agent is a self-contained class in its own file under `/agents/` — including the orchestrator (`orchestrator_agent.py`)
 - Environment variables are always loaded via `python-dotenv` at the top of `main.py`
 - MCP tool inputs and outputs use plain dicts — the MCP server returns JSON; agents parse `response.output`
 - Knowledge base documents are plain Markdown in `/knowledge/` for readability and easy updating
@@ -404,9 +408,15 @@ npm run dev
 # Build for production
 npm run build
 
+# ── Workflow Agent (Copilot Studio / Teams path) ─────────────────
+# Deploy workflow agent to Foundry (registers sub-agents + uploads workflow)
+python deploy_workflow.py
+# → Test in Foundry portal: Build → Agents → va-loan-concierge-workflow → Playground
+
 # ── Run everything (two terminals) ───────────────────────────────
 # Terminal 1:  uvicorn api.server:app --reload --port 8000
 # Terminal 2:  cd ui && npm run dev
+
 ```
 
 ---
@@ -446,7 +456,7 @@ The default `python main.py` run executes the flagship demo query:
 
 ## Borrower Profiles
 
-`DEMO_PROFILES` in `main.py` defines three demo borrowers. The profile flows from the UI
+`DEMO_PROFILES` in `profiles.py` defines three demo borrowers. The profile flows from the UI
 through `useAgentStream.js` → `POST /api/chat` (`profile_id` field on `ChatRequest`) →
 `Orchestrator.run(query, profile_id)`.
 
@@ -479,7 +489,7 @@ through `useAgentStream.js` → `POST /api/chat` (`profile_id` field on `ChatReq
   content — they do not need to reflect actual current VA rates or real lender pricing
 - MCP tools in `/tools/` are **simulations** — they return hardcoded or lightly randomized
   realistic values; no real API calls are made in this demo
-- When adding new agents, follow the pattern established in `advisor_agent.py` —
+- When adding new agents, follow the pattern established in `advisor_agent.py` and `orchestrator_agent.py` —
   async class, typed inputs/outputs, logging throughout
 - `api/server.py` must emit SSE events using the exact `type` values defined in the
   **SSE Stream Format** table above — the UI's `useAgentStream.js` hook depends on them
@@ -504,8 +514,11 @@ through `useAgentStream.js` → `POST /api/chat` (`profile_id` field on `ChatReq
 
 ## Current Status / Planned Upgrades
 
-The end-to-end demo is working. Both agents run, SSE events stream to the UI in real time,
-and the final response renders correctly with real KB grounding and citations.
+The end-to-end demo is working. All three agents run, SSE events stream to the UI in real
+time, and the final response renders correctly with real KB grounding and citations.
+
+**Next phase:** Deploying for M365 Copilot (Work) and Microsoft Teams consumption via
+Foundry Workflow Agent + Copilot Studio. See phase plan at the bottom of this section.
 
 ---
 
@@ -578,3 +591,58 @@ The Function App uses `AuthLevel.ANONYMOUS` — no auth key required.
 **Note on ASGI:** The `mcp` Python package's `AsgiFunctionApp(asgi_app=...)` constructor
 is not supported on Python 3.13 Flex Consumption. The MCP JSON-RPC protocol is implemented
 directly using a standard `FunctionApp` HTTP trigger instead.
+
+---
+
+### 3. Foundry Workflow Agent + Copilot Studio / Teams — ✅ WORKFLOW DEPLOYED
+
+**Target surfaces:** M365 Copilot (Work) and Microsoft Teams via Copilot Studio native
+Foundry connector.
+
+**Two deployment paths (both use the same sub-agents):**
+- **React UI demo** → Python backend (`api/server.py`) with SSE streaming — already working
+- **Copilot Studio / Teams** → Foundry Workflow Agent — declarative, no container needed
+
+**Why Workflow Agent, not Hosted Agent:**
+The hosted agent approach (containerized Python orchestrator exposing `POST /responses` on
+port 8088) was attempted and abandoned. Issues encountered:
+- Foundry runtime requires SSE streaming (rejects plain JSON with "invalid format")
+- SSE connections drop during the 17-20s orchestrator processing time
+- Keepalive workarounds introduced async generator complexity without resolving the timeout
+- The container debugging cycle (build → push → deploy → test) was slow and opaque
+
+Workflow agents are **fully managed, declarative, and require no container**. They support
+multi-agent orchestration natively (sequential, group chat, branching), and each agent node
+can use MCPTool and KB tools. They can be published to Teams and M365 Copilot just like
+hosted agents. Private networking is also supported (hosted agents do not support it during
+preview).
+
+**Why not ConnectedAgentTool / A2APreviewTool:**
+- `ConnectedAgentTool` — classic 1.x SDK only; does not exist in `azure-ai-projects` 2.x
+- `A2APreviewTool` — requires each sub-agent to be separately deployed as an A2A-protocol
+  HTTP server. Foundry agents are A2A *clients*, not servers. Adds infrastructure with no
+  benefit.
+
+**Phase 0 — Foundation** ✅ COMPLETE
+- [x] Refactor: `Orchestrator` class → `agents/orchestrator_agent.py`; profiles/context
+  helpers → `profiles.py`; `main.py` becomes thin CLI entry point
+- [x] Write `Dockerfile` for Python backend (`python:3.13-slim`; requires Python 3.12+)
+- [x] Set up service principal for local Docker auth
+- [x] Clean up hosted agent artifacts (`agent_server.py`, `Dockerfile.hosted`, `azure.yaml`,
+  `agent.yaml`, `infra/`)
+
+**Phase 1 — Workflow Agent** ✅ COMPLETE
+- [x] Define workflow YAML with routing logic (conditional branching)
+- [x] Register Advisor Agent node with KB MCP tool
+- [x] Register Action Agent node with MCP tools
+- [x] Upload workflow via `WorkflowAgentDefinition` + `deploy_workflow.py`
+- [x] Test flagship query end-to-end in Foundry portal playground
+- Note: requires preview header `Foundry-Features: WorkflowAgents=V1Preview` (injected via
+  custom `SansIOHTTPPolicy` in `deploy_workflow.py`)
+
+**Phase 2 — Copilot Studio + Teams**
+- [ ] Publish workflow agent as agent application in Foundry portal
+- [ ] Connect Copilot Studio → Foundry workflow agent (native connector)
+- [ ] Test in Teams
+- [ ] Design Adaptive Cards: refi savings card + appointment confirmation card
+- [ ] Publish to Microsoft Teams + M365 Copilot (Work) channels

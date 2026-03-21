@@ -1,0 +1,93 @@
+kind: workflow
+trigger:
+  kind: OnConversationStart
+  id: trigger_wf
+  actions:
+    # ── Capture user message ──────────────────────────────────────────
+    - kind: SetVariable
+      id: init_msg
+      variable: Local.LatestMessage
+      value: =UserMessage(System.LastMessageText)
+
+    # ── Step 1: Orchestrator classifies the query ─────────────────────
+    # Returns {"needs_advisor": bool, "needs_action": bool}
+    - kind: InvokeAzureAgent
+      id: classify
+      agent:
+        name: va-loan-orchestrator
+      conversationId: =System.ConversationId
+      input:
+        messages: =Local.LatestMessage
+      output:
+        responseObject: Local.Route
+
+    # ── Step 2: Branch on routing decision ────────────────────────────
+    # ConditionGroup evaluates top-down; first match wins.
+    - kind: ConditionGroup
+      id: route
+      conditions:
+        # ── Both agents needed ──────────────────────────────────────
+        - id: both
+          condition: =And(Local.Route.needs_advisor, Local.Route.needs_action)
+          actions:
+            - kind: InvokeAzureAgent
+              id: advisor_both
+              agent:
+                name: va-loan-advisor-iq
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: false
+            - kind: InvokeAzureAgent
+              id: action_both
+              agent:
+                name: va-loan-action-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: true
+
+        # ── Advisor only ────────────────────────────────────────────
+        - id: advisor_only
+          condition: =Local.Route.needs_advisor
+          actions:
+            - kind: InvokeAzureAgent
+              id: advisor_solo
+              agent:
+                name: va-loan-advisor-iq
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: true
+
+        # ── Action only ─────────────────────────────────────────────
+        - id: action_only
+          condition: =Local.Route.needs_action
+          actions:
+            - kind: InvokeAzureAgent
+              id: action_solo
+              agent:
+                name: va-loan-action-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: true
+
+      elseActions:
+        - kind: SendActivity
+          id: fallback
+          activity: "I'm sorry, I couldn't determine how to help with that. Could you rephrase your question about VA loans?"
+
+    - kind: EndConversation
+      id: end
+id: ""
+name: va-loan-concierge-workflow
+description: VA Loan Concierge — routes Veteran queries to advisor and/or action agents based on LLM classification.

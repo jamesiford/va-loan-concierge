@@ -111,7 +111,20 @@ class ActionAgent:
             mcp_ep,
         )
         resp = requests.put(url, headers=headers, json=body, timeout=30)
-        resp.raise_for_status()
+        if resp.status_code == 403:
+            # Connection may already exist from a previous run with different
+            # credentials. Verify it exists via GET before failing.
+            get_resp = requests.get(url, headers=headers, timeout=30)
+            if get_resp.status_code == 200:
+                logger.warning(
+                    "action_agent: PUT connection '%s' returned 403 but connection "
+                    "already exists — continuing with existing connection",
+                    connection_name,
+                )
+                return
+            resp.raise_for_status()
+        else:
+            resp.raise_for_status()
         logger.info(
             "action_agent: connection '%s' ready (status %s)",
             connection_name,

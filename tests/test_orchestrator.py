@@ -11,12 +11,12 @@ Covers:
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from main import (
+from agents.orchestrator_agent import (
     _classify_hint,
-    _demo_context_block,
     _route_label,
     Orchestrator,
 )
+from profiles import _demo_context_block
 
 
 # ---------------------------------------------------------------------------

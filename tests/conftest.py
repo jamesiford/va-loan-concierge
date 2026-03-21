@@ -16,6 +16,7 @@ os.environ.setdefault("KNOWLEDGE_BASE_NAME", "kb-va-loan-test")
 os.environ.setdefault("AZURE_AI_SEARCH_ENDPOINT", "https://test-search.search.windows.net")
 os.environ.setdefault("PROJECT_RESOURCE_ID", "/subscriptions/00000000/resourceGroups/rg-test/providers/Microsoft.CognitiveServices/accounts/test/projects/test-proj")
 os.environ.setdefault("MCP_CONNECTION_NAME", "kb-va-loan-test-mcp")
+os.environ.setdefault("MCP_ENDPOINT", "https://test-mcp.azurewebsites.net/mcp")
 os.environ.setdefault("MCP_ACTION_CONNECTION_NAME", "va-loan-action-test-conn")
 
 

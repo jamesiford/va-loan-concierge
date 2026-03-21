@@ -153,7 +153,20 @@ class AdvisorAgent:
             mcp_ep,
         )
         resp = requests.put(url, headers=headers, json=body, timeout=30)
-        resp.raise_for_status()
+        if resp.status_code == 403:
+            # Connection may already exist from a previous run with different
+            # credentials. Verify it exists via GET before failing.
+            get_resp = requests.get(url, headers=headers, timeout=30)
+            if get_resp.status_code == 200:
+                logger.warning(
+                    "advisor_agent: PUT connection '%s' returned 403 but connection "
+                    "already exists — continuing with existing connection",
+                    connection_name,
+                )
+                return
+            resp.raise_for_status()
+        else:
+            resp.raise_for_status()
         logger.info(
             "advisor_agent: connection '%s' ready (status %s)",
             connection_name,
@@ -261,7 +274,11 @@ class AdvisorAgent:
                         # Build the replacement with the real filename.
                         original = text[start:end]
                         replaced = _CITATION_RE.sub(
-                            lambda m, fn=filename: f"\u3010{m.group(0)[1:-1].rsplit('\u2020', 1)[0]}\u2020{fn}\u3011",
+                            lambda m, fn=filename: (
+                                "\u3010"
+                                + m.group(0)[1:-1].rsplit("\u2020", 1)[0]
+                                + "\u2020" + fn + "\u3011"
+                            ),
                             original,
                         )
                         if replaced != original:
