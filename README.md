@@ -361,3 +361,28 @@ Three selectable profiles inject personalized context into every agent query:
 | Profile-aware responses | Borrower context injected per-query; calculator uses real loan parameters |
 | Governed, citable AI | Every factual claim traces back to a specific knowledge document |
 | Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams |
+
+---
+
+## Roadmap
+
+### Completed
+
+| Phase | Name | What It Does |
+|---|---|---|
+| 0 | Foundation | Refactored orchestrator, profiles, CLI entry point |
+| 1 | Foundry IQ Knowledge Base | Advisor Agent grounded in Azure AI Search KB via MCP (3 knowledge sources, cited responses) |
+| 2 | Azure-Hosted MCP Server | Calculator + Scheduler agents calling tools via custom Azure Function App MCP endpoint |
+| 3 | Workflow Agent | Declarative YAML orchestration deployed to Foundry for Copilot Studio / Teams path |
+| 4 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 12 RBAC assignments, zero manual steps |
+
+### Planned
+
+| Phase | Name | Goal | Key Changes |
+|---|---|---|---|
+| **5** | **Web App Deployment** | Deploy to Azure App Service — accessible at a public URL | New `web-app.bicep`, `predeploy.sh` (React build), static file mount in FastAPI, 5 MI role assignments |
+| **6** | **Observability** | End-to-end tracing in Azure portal + Foundry | OpenTelemetry + Azure Monitor exporter, per-agent trace spans, conversation audit logging, 90-day retention |
+| **7** | **Authentication** | Entra ID Easy Auth — system knows who the user is | App registration via hook, `X-MS-CLIENT-PRINCIPAL` header extraction, Work IQ Calendar delegated auth |
+| **8** | **Network Isolation** | VNet + private endpoints for financial institution compliance | New `network.bicep` (VNet, 3 subnets, NSG, 3 PEs, 3 DNS zones), disable public access on all backend services, Function App moves to shared B1 plan, MI-based storage auth |
+
+Phases are numbered in recommended execution order. Each phase is independently deployable after Phase 5.

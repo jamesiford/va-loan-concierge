@@ -615,8 +615,9 @@ The end-to-end demo is working. All four sub-agents (advisor, calculator, schedu
 calendar) run, SSE events stream to the UI in real time, and per-agent partial responses
 render correctly with real KB grounding and citations.
 
-**Next phase:** Deploying for M365 Copilot (Work) and Microsoft Teams consumption via
-Foundry Workflow Agent + Copilot Studio. See phase plan at the bottom of this section.
+**Completed:** Phases 0–4 (agents, MCP, Foundry IQ, workflow agent, IaC).
+**Next:** Phases 5–8 bring production readiness — deployed web app, observability,
+authentication, and network isolation (numbered in recommended execution order).
 
 ---
 
@@ -796,3 +797,263 @@ swedencentral, northcentralus).
 
 **One manual step:** Work IQ Calendar connection must be configured in Foundry portal
 (requires M365 Copilot license). Demo works without it.
+
+---
+
+### 5. Web App Deployment (App Service + Static Build) — PLANNED
+
+**Goal:** Deploy the FastAPI backend + React frontend as an Azure App Service so the demo
+is accessible at a public URL without running locally.
+
+**New Bicep module: `infra/modules/web-app.bicep`**
+- App Service Plan: `plan-${environmentName}`, SKU **B1** (minimum required for VNet
+  integration in Phase 8 — do not use Free/Shared/B0)
+- App Service: `app-${environmentName}`, `kind: 'app,linux'`, `linuxFxVersion: 'PYTHON|3.12'`
+- `identity.type: 'SystemAssigned'` — managed identity replaces `az login` credential
+- `appCommandLine: 'uvicorn api.server:app --host 0.0.0.0 --port 8000'`
+- `SCM_DO_BUILD_DURING_DEPLOYMENT: 'true'` — Oryx runs `pip install -r requirements.txt`
+- App Settings: all env vars from `.env.example` passed from `main.bicep` outputs +
+  `APPLICATIONINSIGHTS_CONNECTION_STRING` + `WEB_APP_ORIGIN`
+- Outputs: `webAppId`, `webAppName`, `webAppPrincipalId`, `webAppHostname`, `appServicePlanId`
+
+**Modify: `infra/main.bicep`**
+- Add `module webApp 'modules/web-app.bicep'` at Level 2 (alongside `functionApp`)
+- Pass all Foundry/MCP env vars from other module outputs + monitoring connection string
+- Pass `webAppPrincipalId` to `rbac` module
+- New outputs: `WEB_APP_HOSTNAME`, `WEB_APP_NAME`
+
+**Modify: `infra/modules/rbac.bicep`**
+- New param: `webAppPrincipalId`
+- 5 new role assignments for Web App MI (`principalType: 'ServicePrincipal'`):
+  - `Cognitive Services OpenAI User` on AI Services (Responses API)
+  - `Cognitive Services User` on AI Services (agent management)
+  - `Search Index Data Reader` on Search (KB queries)
+  - `Storage Blob Data Reader` on Storage
+  - `Contributor` on resource group (ARM PUT for RemoteTool connections during `initialize()`)
+
+**Code changes:**
+- `api/server.py` — add `StaticFiles` mount (after all API routes) serving `./static/`
+  with `html=True` for SPA fallback. Add dynamic CORS origin from `WEB_APP_ORIGIN` env var.
+- No frontend code changes — Vite production build uses relative paths (`/api/chat`)
+  which resolve correctly when served from the same origin.
+
+**New hook: `infra/hooks/predeploy.sh`**
+- `cd ui && npm ci && npm run build`
+- Copy `ui/dist/*` → `./static/` (included in the azd deploy package)
+
+**Modify: `azure.yaml`**
+- Add service `web-app: { host: appservice, language: python, project: ./ }`
+- Add `predeploy` hook reference
+
+**Modify: `infra/hooks/postdeploy.sh`**
+- Add `WEB_APP_HOSTNAME` and `WEB_APP_NAME` to `.env` generation
+
+**Auth note:** `DefaultAzureCredential` on App Service automatically picks up the
+system-assigned managed identity — no code changes needed. The same agent initialization
+code works locally (via `az login`) and in production (via MI).
+
+Items:
+- [ ] Create `infra/modules/web-app.bicep`
+- [ ] Create `infra/hooks/predeploy.sh` (React build + copy to static/)
+- [ ] Modify `infra/main.bicep` — add web-app module, wire outputs
+- [ ] Modify `infra/modules/rbac.bicep` — add 5 Web App MI role assignments
+- [ ] Modify `azure.yaml` — add web-app service + predeploy hook
+- [ ] Modify `api/server.py` — add StaticFiles mount + dynamic CORS
+- [ ] Modify `infra/hooks/postdeploy.sh` — add new env vars
+- [ ] Test: `azd up` → browse `https://app-{env}.azurewebsites.net` → UI loads, query works
+
+---
+
+### 6. Observability — App Insights + OpenTelemetry + Audit — PLANNED
+
+**Goal:** Complete the tracing story so conversation threads, tool calls, and agent
+routing decisions are visible in the Azure portal. Required for financial compliance
+audit trails.
+
+**Foundry Portal Tracing (already works):**
+Agent traces are tied to the agent/project, NOT the calling surface. Every Responses API
+call — whether from the playground, CLI, or the FastAPI server — generates a trace visible
+in the Foundry portal under **Tracing**. Thread IDs, tool calls, and token usage all
+appear. No additional configuration needed.
+
+**New file: `api/telemetry.py`**
+- `setup_telemetry(app)` — initializes OTel `TracerProvider` with `AzureMonitorTraceExporter`
+- Instruments: FastAPI (request spans), `requests` (ARM calls), `aiohttp` (Foundry SDK)
+- No-ops gracefully when `APPLICATIONINSIGHTS_CONNECTION_STRING` is absent (local dev)
+
+**Modify: `requirements.txt`** — add:
+```
+opentelemetry-api>=1.25.0
+opentelemetry-sdk>=1.25.0
+opentelemetry-instrumentation-fastapi>=0.46b0
+opentelemetry-instrumentation-requests>=0.46b0
+opentelemetry-instrumentation-aiohttp>=0.46b0
+azure-monitor-opentelemetry-exporter>=1.0.0b27
+```
+
+**Modify: `api/server.py`**
+- Call `setup_telemetry(app)` in the lifespan function before orchestrator init
+- Add `_log_conversation()` — creates OTel span with attributes: query, profile_id,
+  agent chain, user identity (from Phase 7 if complete)
+
+**Modify: `agents/orchestrator_agent.py`**
+- Add OTel spans around routing classification and each sub-agent call
+- Trace hierarchy: `POST /api/chat` → `orchestrator.classify` → `agent.advisor` →
+  `agent.calculator` → `agent.scheduler` → `agent.calendar`
+- All visible in App Insights Transaction Search and Application Map
+
+**Modify: `infra/modules/monitoring.bicep`**
+- Increase `retentionInDays` from 30 to 90 (financial compliance)
+
+**App Settings** (already set from Phase 5):
+- `APPLICATIONINSIGHTS_CONNECTION_STRING`
+- `OTEL_SERVICE_NAME: 'va-loan-concierge'`
+
+**Future consideration:** For long-term audit trails beyond App Insights retention,
+add a persistent conversation store (Cosmos DB or Table Storage). Out of scope for
+initial implementation — App Insights + Foundry tracing covers the demo.
+
+Items:
+- [ ] Create `api/telemetry.py` (OTel setup + Azure Monitor exporter)
+- [ ] Modify `requirements.txt` — add OTel packages
+- [ ] Modify `api/server.py` — call setup_telemetry + add conversation audit logging
+- [ ] Modify `agents/orchestrator_agent.py` — add OTel spans per agent
+- [ ] Modify `infra/modules/monitoring.bicep` — increase retention to 90 days
+- [ ] Test: run query → App Insights Transaction Search shows full trace hierarchy
+- [ ] Verify: Foundry portal Tracing shows agent traces from API-originated requests
+
+---
+
+### 7. Authentication — Entra ID Easy Auth — PLANNED
+
+**Goal:** Add user authentication so the system knows who the logged-in Veteran is.
+Required for Work IQ Calendar (delegated auth) and audit logging.
+
+**Approach:** App Service Easy Auth (built-in authentication) with Microsoft Entra ID
+provider. No frontend code changes — Easy Auth handles login redirect at the platform
+level; `fetch` calls include the session cookie automatically.
+
+**Modify: `infra/hooks/postprovision.sh`** — add section after existing connection setup:
+- `az ad app create` — Entra app registration with redirect URI
+  `https://{WEB_APP_HOSTNAME}/.auth/login/aad/callback`, audience `AzureADMyOrg`
+- `az ad sp create` — service principal for the app
+- `azd env set AUTH_CLIENT_ID $APP_ID`
+- `az webapp auth microsoft update` — enable Easy Auth on the App Service
+- Idempotent: only runs when `AUTH_CLIENT_ID` is not already set
+
+**Code changes:**
+- `api/server.py` — add `_get_user_identity(request)` helper to extract
+  `X-MS-CLIENT-PRINCIPAL-ID` and `X-MS-CLIENT-PRINCIPAL-NAME` headers injected by
+  Easy Auth. Log user identity on each request (feeds Phase 6 audit trail).
+- No React/frontend changes — Easy Auth redirects to Microsoft login before the SPA
+  loads. After authentication, all API calls include the session cookie automatically.
+
+**Work IQ Calendar — delegated auth:**
+When the user is authenticated via Entra, the Foundry Work IQ Calendar connection can
+be configured for delegated (OAuth2) permissions in the Foundry portal. This allows the
+Calendar Agent to create events on the *authenticated user's* M365 calendar rather than
+a service account's calendar.
+- Requires M365 Copilot license on the user
+- Must be configured manually in the Foundry portal (project → Connections → Work IQ
+  Calendar → edit to delegated auth)
+
+**Prerequisites:**
+- Phase 5 must be complete (App Service must exist)
+- User running `azd up` needs `Application Administrator` or `Cloud Application
+  Administrator` directory role in Entra to create app registrations
+
+Items:
+- [ ] Modify `infra/hooks/postprovision.sh` — add Entra app registration + Easy Auth setup
+- [ ] Modify `api/server.py` — add user identity extraction + logging
+- [ ] Document Work IQ Calendar delegated auth manual step
+- [ ] Test: browse → redirect to Microsoft login → authenticate → query works with user logged
+
+---
+
+### 8. Network Isolation — VNet + Private Endpoints — PLANNED
+
+**Goal:** Lock down all backend services behind a VNet with private endpoints. Only the
+App Service frontend remains publicly accessible (behind Easy Auth). Required for
+financial institution compliance.
+
+**New Bicep module: `infra/modules/network.bicep`**
+- **VNet**: `vnet-${environmentName}`, address space `10.0.0.0/16`
+- **Subnets**:
+  - `snet-webapp` (`10.0.1.0/24`) — delegation: `Microsoft.Web/serverFarms`
+  - `snet-functions` (`10.0.2.0/24`) — delegation: `Microsoft.Web/serverFarms`
+  - `snet-private-endpoints` (`10.0.3.0/24`) — no delegation
+- **NSG** on PE subnet: allow VNet inbound, deny internet inbound
+- **Private Endpoints** (3):
+  - `pe-ais-{env}` → AI Services (`privatelink.cognitiveservices.azure.com`)
+  - `pe-srch-{env}` → AI Search (`privatelink.search.windows.net`)
+  - `pe-st-{env}` → Storage blob (`privatelink.blob.core.windows.net`)
+- **Private DNS Zones** (3) — each linked to VNet with auto-registration via zone groups
+- Outputs: `vnetId`, `webAppSubnetId`, `functionsSubnetId`
+
+**Modify existing Bicep modules — disable public access:**
+- `ai-services.bicep`: `publicNetworkAccess: 'Disabled'`, `networkAcls.defaultAction: 'Deny'`
+- `search.bicep`: `publicNetworkAccess: 'disabled'`
+- `storage.bicep`: `publicNetworkAccess: 'Disabled'`, `allowSharedKeyAccess: false`,
+  `networkAcls: { defaultAction: 'Deny', bypass: 'AzureServices' }`
+
+**Function App hosting change (important):**
+The current Y1 Consumption plan does NOT support VNet integration. Rather than upgrade to
+EP1 Elastic Premium (~$200/month, overkill for demo), move the Function App to the same
+B1 App Service Plan created in Phase 5.
+- `function-app.bicep`: remove the Y1 plan resource, add `appServicePlanId` param (from
+  web-app module output), add `virtualNetworkSubnetId` + `vnetRouteAllEnabled: true`
+- Replace shared-key `AzureWebJobsStorage` connection string with MI-based auth:
+  `AzureWebJobsStorage__accountName: storageAccountName`
+
+**Modify: `web-app.bicep`**
+- Add `virtualNetworkSubnetId` + `vnetRouteAllEnabled: true`
+- Export `appServicePlanId` output (shared with Function App)
+
+**Modify: `infra/main.bicep`**
+- Add `module network` at Level 1 (after monitoring, before AI Services)
+- Add optional `trustedIp` parameter (default empty)
+- Wire subnet IDs to web-app and function-app modules
+- Wire web app plan ID to function-app module
+
+**New RBAC (in `rbac.bicep`):**
+- Function App MI → `Storage Blob Data Owner` on Storage (for Functions runtime)
+- Function App MI → `Storage Queue Data Contributor` on Storage (Functions uses queues)
+
+**Provisioning hook changes (`postprovision.sh`):**
+Data-plane calls (blob upload, Search index creation) will fail when public access is
+disabled. Solution: if `TRUSTED_IP` is set, add the developer's IP to network rules at
+the start of the hook, perform data-plane operations, then optionally remove.
+```bash
+azd env set TRUSTED_IP $(curl -s ifconfig.me)
+azd up
+```
+
+**No application code changes.** All network changes are infrastructure-only.
+`DefaultAzureCredential` continues to work — MI reaches backend services over the VNet.
+ARM control-plane calls (`management.azure.com`) are public and work from inside the VNet.
+
+Items:
+- [ ] Create `infra/modules/network.bicep` (VNet, subnets, NSG, PEs, DNS zones)
+- [ ] Modify `infra/modules/ai-services.bicep` — disable public access
+- [ ] Modify `infra/modules/search.bicep` — disable public access
+- [ ] Modify `infra/modules/storage.bicep` — disable public access + shared key
+- [ ] Modify `infra/modules/function-app.bicep` — shared plan + VNet + MI storage auth
+- [ ] Modify `infra/modules/web-app.bicep` — VNet integration + export plan ID
+- [ ] Modify `infra/modules/rbac.bicep` — add Function App MI storage roles
+- [ ] Modify `infra/main.bicep` — wire network module + trustedIp param
+- [ ] Modify `infra/hooks/postprovision.sh` — add trusted IP bypass logic
+- [ ] Test: all private endpoints resolve, public access denied, `azd up` succeeds
+
+---
+
+### Phase Sequencing
+
+Phases are numbered in recommended execution order. Each `azd up` leaves the system
+fully working. Phases 6, 7, and 8 are independently deployable after Phase 5.
+
+```
+Phase 5 (Web App)       ← foundation for all others
+    ├── Phase 6 (Observability) — debugging visibility for later phases
+    ├── Phase 7 (Auth)          — simpler to validate on public endpoint
+    └── Phase 8 (Network)       — most complex, do last
+```
