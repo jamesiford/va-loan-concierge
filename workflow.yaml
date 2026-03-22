@@ -23,10 +23,30 @@ trigger:
 
     # ── Step 2: Branch on routing decision ────────────────────────────
     # ConditionGroup evaluates top-down; first match wins.
+    #
+    # Human-in-the-loop patterns used in this workflow:
+    #
+    # CALCULATOR HIL (branches with needs_calculator):
+    #   1. Question collects 5 loan params (or user says "skip")
+    #   2. If skip → bypass calculator, continue flow
+    #   3. Else → enrich message, run calculator
+    #   4. Post-calc Question: "Results look right? Provide more or skip."
+    #   5. GotoAction loop: good → continue | skip → continue |
+    #      more details (up to 3) → enrich, re-run, loop back to step 4
+    #
+    # SCHEDULER HIL (branches with needs_scheduler):
+    #   1. Scheduler runs, books appointment
+    #   2. Question: confirm / reschedule / decline
+    #   3. GotoAction loop: confirm → calendar | reschedule (up to 3) →
+    #      re-run scheduler, loop back to step 2 | decline → skip calendar
+    #
+    # Scheduler-only branches do NOT ask for loan details.
     - kind: ConditionGroup
       id: route
       conditions:
-        # ── All three agents needed ───────────────────────────────
+        # ══════════════════════════════════════════════════════════
+        # All three agents needed
+        # ══════════════════════════════════════════════════════════
         - id: all_three
           condition: =And(Local.Route.needs_advisor, Local.Route.needs_calculator, Local.Route.needs_scheduler)
           actions:
@@ -39,17 +59,92 @@ trigger:
                 messages: =Local.LatestMessage
               output:
                 messages: Local.LatestMessage
-                autoSend: false
-            - kind: InvokeAzureAgent
-              id: calculator_all
-              agent:
-                name: va-loan-calculator-mcp
-              conversationId: =System.ConversationId
-              input:
-                messages: =Local.LatestMessage
-              output:
-                messages: Local.LatestMessage
-                autoSend: false
+                autoSend: true
+            # ── Calculator HIL ──────────────────────────────────
+            - kind: Question
+              id: ask_loan_details_all
+              prompt: "To calculate your refinance savings, I need five pieces of information:\n1. Current loan balance (e.g. $320,000)\n2. Current interest rate (e.g. 6.8%)\n3. New/quoted interest rate (e.g. 6.1%)\n4. Remaining term in years (e.g. 27)\n5. VA funding fee exempt? (yes if service-connected disability)\n\nPlease provide all five, or say 'skip' to move on without a calculation."
+              entity: StringPrebuiltEntity
+              variable: Local.LoanDetails
+            - kind: ConditionGroup
+              id: check_skip_calc_all
+              conditions:
+                - id: skip_calc_all
+                  condition: '=Or(Contains(Lower(Local.LoanDetails), "skip"), Contains(Lower(Local.LoanDetails), "move on"), Contains(Lower(Local.LoanDetails), "no calc"), Contains(Lower(Local.LoanDetails), "never mind"), Contains(Lower(Local.LoanDetails), "don''t calculate"), Contains(Lower(Local.LoanDetails), "forget it"), Contains(Lower(Local.LoanDetails), "use defaults"), Contains(Lower(Local.LoanDetails), "default"))'
+                  actions:
+                    - kind: SendActivity
+                      id: calc_skipped_all
+                      activity: "No problem — skipping the refinance calculation. Let me get your appointment set up."
+              elseActions:
+                - kind: SetVariable
+                  id: enrich_calc_all
+                  variable: Local.LatestMessage
+                  value: '=UserMessage(Concatenate(System.LastMessageText, " [Borrower-provided loan details: ", Local.LoanDetails, ". Use these details for the refinance calculation. Extract current_rate, new_rate, balance, remaining_term, and funding_fee_exempt from the borrower response above.]"))'
+                - kind: SetVariable
+                  id: init_calc_retry_all
+                  variable: Local.CalcRetryCount
+                  value: =0
+                - kind: InvokeAzureAgent
+                  id: calculator_all
+                  agent:
+                    name: va-loan-calculator-mcp
+                  conversationId: =System.ConversationId
+                  input:
+                    messages: =Local.LatestMessage
+                  output:
+                    messages: Local.LatestMessage
+                    autoSend: true
+                # ── Post-calc follow-up loop ────────────────────
+                - kind: Question
+                  id: calc_followup_all
+                  prompt: "Does the calculation look right? If the calculator asked for more details, please provide them now. You can also say 'skip' to move on."
+                  entity: StringPrebuiltEntity
+                  variable: Local.CalcFollowup
+                - kind: ConditionGroup
+                  id: check_calc_followup_all
+                  conditions:
+                    - id: calc_good_all
+                      condition: '=Or(Contains(Lower(Local.CalcFollowup), "yes"), Contains(Lower(Local.CalcFollowup), "looks good"), Contains(Lower(Local.CalcFollowup), "correct"), Contains(Lower(Local.CalcFollowup), "right"), Contains(Lower(Local.CalcFollowup), "great"), Contains(Lower(Local.CalcFollowup), "perfect"), Contains(Lower(Local.CalcFollowup), "continue"))'
+                      actions: []
+                    - id: calc_skip_followup_all
+                      condition: '=Or(Contains(Lower(Local.CalcFollowup), "skip"), Contains(Lower(Local.CalcFollowup), "move on"), Contains(Lower(Local.CalcFollowup), "no calc"), Contains(Lower(Local.CalcFollowup), "never mind"), Contains(Lower(Local.CalcFollowup), "don''t calculate"), Contains(Lower(Local.CalcFollowup), "forget it"), Contains(Lower(Local.CalcFollowup), "use defaults"), Contains(Lower(Local.CalcFollowup), "default"))'
+                      actions:
+                        - kind: SendActivity
+                          id: calc_skipped_followup_all
+                          activity: "Understood — moving on without completing the calculation."
+                  elseActions:
+                    - id: calc_retry_all
+                      kind: ConditionGroup
+                      conditions:
+                        - id: calc_retry_ok_all
+                          condition: =Local.CalcRetryCount < 3
+                          actions:
+                            - kind: SetVariable
+                              id: inc_calc_retry_all
+                              variable: Local.CalcRetryCount
+                              value: =Local.CalcRetryCount + 1
+                            - kind: SetVariable
+                              id: enrich_calc_retry_all
+                              variable: Local.LatestMessage
+                              value: '=UserMessage(Concatenate(System.LastMessageText, " [Additional borrower details: ", Local.CalcFollowup, ". Use ALL borrower-provided details to call the refi_savings_calculator tool now.]"))'
+                            - kind: InvokeAzureAgent
+                              id: calculator_retry_all
+                              agent:
+                                name: va-loan-calculator-mcp
+                              conversationId: =System.ConversationId
+                              input:
+                                messages: =Local.LatestMessage
+                              output:
+                                messages: Local.LatestMessage
+                                autoSend: true
+                            - kind: GotoAction
+                              id: goto_calc_followup_all
+                              actionId: calc_followup_all
+                      elseActions:
+                        - kind: SendActivity
+                          id: calc_max_retry_all
+                          activity: "I wasn't able to complete the calculation after several attempts. Let me continue with scheduling your appointment."
+            # ── Scheduler ───────────────────────────────────────
             - kind: InvokeAzureAgent
               id: scheduler_all
               agent:
@@ -59,19 +154,68 @@ trigger:
                 messages: =Local.LatestMessage
               output:
                 messages: Local.LatestMessage
-                autoSend: false
-            - kind: InvokeAzureAgent
-              id: calendar_all
-              agent:
-                name: va-loan-calendar-mcp
-              conversationId: =System.ConversationId
-              input:
-                messages: =Local.LatestMessage
-              output:
-                messages: Local.LatestMessage
                 autoSend: true
+            # ── Scheduler HIL: confirm / reschedule / decline ───
+            - kind: SetVariable
+              id: init_resched_count_all
+              variable: Local.RescheduleCount
+              value: =0
+            - kind: Question
+              id: confirm_appt_all
+              prompt: "Does this appointment work for you? I can add it to your calendar, reschedule it, or skip the calendar event."
+              entity: StringPrebuiltEntity
+              variable: Local.ApptConfirmation
+            - kind: ConditionGroup
+              id: check_appt_all
+              conditions:
+                # Decline — checked first (matches Python _keyword_classify_confirmation order)
+                - id: appt_decline_all
+                  condition: '=Or(Contains(Lower(Local.ApptConfirmation), "no thank"), Contains(Lower(Local.ApptConfirmation), "skip"), Contains(Lower(Local.ApptConfirmation), "don''t"), Contains(Lower(Local.ApptConfirmation), "cancel"), Contains(Lower(Local.ApptConfirmation), "decline"), Contains(Lower(Local.ApptConfirmation), "not now"))'
+                  actions:
+                    - kind: SendActivity
+                      id: skip_calendar_all
+                      activity: "No problem — your appointment is still confirmed with the details above. I've skipped the calendar event. Is there anything else I can help with?"
+                # Reschedule — checked second
+                - id: appt_reschedule_all
+                  condition: '=And(Local.RescheduleCount < 3, Or(Contains(Lower(Local.ApptConfirmation), "reschedule"), Contains(Lower(Local.ApptConfirmation), "different"), Contains(Lower(Local.ApptConfirmation), "change"), Contains(Lower(Local.ApptConfirmation), "instead"), Contains(Lower(Local.ApptConfirmation), "another"), Contains(Lower(Local.ApptConfirmation), "monday"), Contains(Lower(Local.ApptConfirmation), "tuesday"), Contains(Lower(Local.ApptConfirmation), "wednesday"), Contains(Lower(Local.ApptConfirmation), "thursday"), Contains(Lower(Local.ApptConfirmation), "friday"), Contains(Lower(Local.ApptConfirmation), "saturday"), Contains(Lower(Local.ApptConfirmation), "morning"), Contains(Lower(Local.ApptConfirmation), "afternoon"), Contains(Lower(Local.ApptConfirmation), "earlier"), Contains(Lower(Local.ApptConfirmation), "later")))'
+                  actions:
+                    - kind: SetVariable
+                      id: inc_resched_all
+                      variable: Local.RescheduleCount
+                      value: =Local.RescheduleCount + 1
+                    - kind: SetVariable
+                      id: enrich_resched_all
+                      variable: Local.LatestMessage
+                      value: '=UserMessage(Concatenate("RESCHEDULE REQUEST: The Veteran wants to change their appointment. Their previous appointment details are in the conversation above. New preference: ", Local.ApptConfirmation, ". Call the appointment_scheduler tool with the day and time the Veteran specified. You MUST use a DIFFERENT day or time than the previous appointment."))'
+                    - kind: InvokeAzureAgent
+                      id: scheduler_resched_all
+                      agent:
+                        name: va-loan-scheduler-mcp
+                      conversationId: =System.ConversationId
+                      input:
+                        messages: =Local.LatestMessage
+                      output:
+                        messages: Local.LatestMessage
+                        autoSend: true
+                    - kind: GotoAction
+                      id: goto_confirm_all
+                      actionId: confirm_appt_all
+              # Default — confirm (matches Python's default return "confirm")
+              elseActions:
+                - kind: InvokeAzureAgent
+                  id: calendar_all
+                  agent:
+                    name: va-loan-calendar-mcp
+                  conversationId: =System.ConversationId
+                  input:
+                    messages: =Local.LatestMessage
+                  output:
+                    messages: Local.LatestMessage
+                    autoSend: true
 
-        # ── Advisor + Calculator ──────────────────────────────────
+        # ══════════════════════════════════════════════════════════
+        # Advisor + Calculator
+        # ══════════════════════════════════════════════════════════
         - id: advisor_calculator
           condition: =And(Local.Route.needs_advisor, Local.Route.needs_calculator)
           actions:
@@ -84,19 +228,94 @@ trigger:
                 messages: =Local.LatestMessage
               output:
                 messages: Local.LatestMessage
-                autoSend: false
-            - kind: InvokeAzureAgent
-              id: calculator_ac
-              agent:
-                name: va-loan-calculator-mcp
-              conversationId: =System.ConversationId
-              input:
-                messages: =Local.LatestMessage
-              output:
-                messages: Local.LatestMessage
                 autoSend: true
+            # ── Calculator HIL ──────────────────────────────────
+            - kind: Question
+              id: ask_loan_details_ac
+              prompt: "To calculate your refinance savings, I need five pieces of information:\n1. Current loan balance (e.g. $320,000)\n2. Current interest rate (e.g. 6.8%)\n3. New/quoted interest rate (e.g. 6.1%)\n4. Remaining term in years (e.g. 27)\n5. VA funding fee exempt? (yes if service-connected disability)\n\nPlease provide all five, or say 'skip' to move on without a calculation."
+              entity: StringPrebuiltEntity
+              variable: Local.LoanDetails
+            - kind: ConditionGroup
+              id: check_skip_calc_ac
+              conditions:
+                - id: skip_calc_ac
+                  condition: '=Or(Contains(Lower(Local.LoanDetails), "skip"), Contains(Lower(Local.LoanDetails), "move on"), Contains(Lower(Local.LoanDetails), "no calc"), Contains(Lower(Local.LoanDetails), "never mind"), Contains(Lower(Local.LoanDetails), "don''t calculate"), Contains(Lower(Local.LoanDetails), "forget it"), Contains(Lower(Local.LoanDetails), "use defaults"), Contains(Lower(Local.LoanDetails), "default"))'
+                  actions:
+                    - kind: SendActivity
+                      id: calc_skipped_ac
+                      activity: "No problem — skipping the refinance calculation."
+              elseActions:
+                - kind: SetVariable
+                  id: enrich_calc_ac
+                  variable: Local.LatestMessage
+                  value: '=UserMessage(Concatenate(System.LastMessageText, " [Borrower-provided loan details: ", Local.LoanDetails, ". Use these details for the refinance calculation. Extract current_rate, new_rate, balance, remaining_term, and funding_fee_exempt from the borrower response above.]"))'
+                - kind: SetVariable
+                  id: init_calc_retry_ac
+                  variable: Local.CalcRetryCount
+                  value: =0
+                - kind: InvokeAzureAgent
+                  id: calculator_ac
+                  agent:
+                    name: va-loan-calculator-mcp
+                  conversationId: =System.ConversationId
+                  input:
+                    messages: =Local.LatestMessage
+                  output:
+                    messages: Local.LatestMessage
+                    autoSend: true
+                - kind: Question
+                  id: calc_followup_ac
+                  prompt: "Does the calculation look right? If the calculator asked for more details, please provide them now. You can also say 'skip' to move on."
+                  entity: StringPrebuiltEntity
+                  variable: Local.CalcFollowup
+                - kind: ConditionGroup
+                  id: check_calc_followup_ac
+                  conditions:
+                    - id: calc_good_ac
+                      condition: '=Or(Contains(Lower(Local.CalcFollowup), "yes"), Contains(Lower(Local.CalcFollowup), "looks good"), Contains(Lower(Local.CalcFollowup), "correct"), Contains(Lower(Local.CalcFollowup), "right"), Contains(Lower(Local.CalcFollowup), "great"), Contains(Lower(Local.CalcFollowup), "perfect"), Contains(Lower(Local.CalcFollowup), "continue"))'
+                      actions: []
+                    - id: calc_skip_followup_ac
+                      condition: '=Or(Contains(Lower(Local.CalcFollowup), "skip"), Contains(Lower(Local.CalcFollowup), "move on"), Contains(Lower(Local.CalcFollowup), "no calc"), Contains(Lower(Local.CalcFollowup), "never mind"), Contains(Lower(Local.CalcFollowup), "don''t calculate"), Contains(Lower(Local.CalcFollowup), "forget it"), Contains(Lower(Local.CalcFollowup), "use defaults"), Contains(Lower(Local.CalcFollowup), "default"))'
+                      actions:
+                        - kind: SendActivity
+                          id: calc_skipped_followup_ac
+                          activity: "Understood — moving on without completing the calculation."
+                  elseActions:
+                    - id: calc_retry_ac
+                      kind: ConditionGroup
+                      conditions:
+                        - id: calc_retry_ok_ac
+                          condition: =Local.CalcRetryCount < 3
+                          actions:
+                            - kind: SetVariable
+                              id: inc_calc_retry_ac
+                              variable: Local.CalcRetryCount
+                              value: =Local.CalcRetryCount + 1
+                            - kind: SetVariable
+                              id: enrich_calc_retry_ac
+                              variable: Local.LatestMessage
+                              value: '=UserMessage(Concatenate(System.LastMessageText, " [Additional borrower details: ", Local.CalcFollowup, ". Use ALL borrower-provided details to call the refi_savings_calculator tool now.]"))'
+                            - kind: InvokeAzureAgent
+                              id: calculator_retry_ac
+                              agent:
+                                name: va-loan-calculator-mcp
+                              conversationId: =System.ConversationId
+                              input:
+                                messages: =Local.LatestMessage
+                              output:
+                                messages: Local.LatestMessage
+                                autoSend: true
+                            - kind: GotoAction
+                              id: goto_calc_followup_ac
+                              actionId: calc_followup_ac
+                      elseActions:
+                        - kind: SendActivity
+                          id: calc_max_retry_ac
+                          activity: "I wasn't able to complete the calculation after several attempts."
 
-        # ── Advisor + Scheduler ───────────────────────────────────
+        # ══════════════════════════════════════════════════════════
+        # Advisor + Scheduler (no calculator — no loan details HIL)
+        # ══════════════════════════════════════════════════════════
         - id: advisor_scheduler
           condition: =And(Local.Route.needs_advisor, Local.Route.needs_scheduler)
           actions:
@@ -109,7 +328,7 @@ trigger:
                 messages: =Local.LatestMessage
               output:
                 messages: Local.LatestMessage
-                autoSend: false
+                autoSend: true
             - kind: InvokeAzureAgent
               id: scheduler_as
               agent:
@@ -119,32 +338,152 @@ trigger:
                 messages: =Local.LatestMessage
               output:
                 messages: Local.LatestMessage
-                autoSend: false
-            - kind: InvokeAzureAgent
-              id: calendar_as
-              agent:
-                name: va-loan-calendar-mcp
-              conversationId: =System.ConversationId
-              input:
-                messages: =Local.LatestMessage
-              output:
-                messages: Local.LatestMessage
                 autoSend: true
+            # ── Scheduler HIL: confirm / reschedule / decline ───
+            - kind: SetVariable
+              id: init_resched_count_as
+              variable: Local.RescheduleCount
+              value: =0
+            - kind: Question
+              id: confirm_appt_as
+              prompt: "Does this appointment work for you? I can add it to your calendar, reschedule it, or skip the calendar event."
+              entity: StringPrebuiltEntity
+              variable: Local.ApptConfirmation
+            - kind: ConditionGroup
+              id: check_appt_as
+              conditions:
+                - id: appt_decline_as
+                  condition: '=Or(Contains(Lower(Local.ApptConfirmation), "no thank"), Contains(Lower(Local.ApptConfirmation), "skip"), Contains(Lower(Local.ApptConfirmation), "don''t"), Contains(Lower(Local.ApptConfirmation), "cancel"), Contains(Lower(Local.ApptConfirmation), "decline"), Contains(Lower(Local.ApptConfirmation), "not now"))'
+                  actions:
+                    - kind: SendActivity
+                      id: skip_calendar_as
+                      activity: "No problem — your appointment is still confirmed with the details above. I've skipped the calendar event. Is there anything else I can help with?"
+                - id: appt_reschedule_as
+                  condition: '=And(Local.RescheduleCount < 3, Or(Contains(Lower(Local.ApptConfirmation), "reschedule"), Contains(Lower(Local.ApptConfirmation), "different"), Contains(Lower(Local.ApptConfirmation), "change"), Contains(Lower(Local.ApptConfirmation), "instead"), Contains(Lower(Local.ApptConfirmation), "another"), Contains(Lower(Local.ApptConfirmation), "monday"), Contains(Lower(Local.ApptConfirmation), "tuesday"), Contains(Lower(Local.ApptConfirmation), "wednesday"), Contains(Lower(Local.ApptConfirmation), "thursday"), Contains(Lower(Local.ApptConfirmation), "friday"), Contains(Lower(Local.ApptConfirmation), "saturday"), Contains(Lower(Local.ApptConfirmation), "morning"), Contains(Lower(Local.ApptConfirmation), "afternoon"), Contains(Lower(Local.ApptConfirmation), "earlier"), Contains(Lower(Local.ApptConfirmation), "later")))'
+                  actions:
+                    - kind: SetVariable
+                      id: inc_resched_as
+                      variable: Local.RescheduleCount
+                      value: =Local.RescheduleCount + 1
+                    - kind: SetVariable
+                      id: enrich_resched_as
+                      variable: Local.LatestMessage
+                      value: '=UserMessage(Concatenate("RESCHEDULE REQUEST: The Veteran wants to change their appointment. Their previous appointment details are in the conversation above. New preference: ", Local.ApptConfirmation, ". Call the appointment_scheduler tool with the day and time the Veteran specified. You MUST use a DIFFERENT day or time than the previous appointment."))'
+                    - kind: InvokeAzureAgent
+                      id: scheduler_resched_as
+                      agent:
+                        name: va-loan-scheduler-mcp
+                      conversationId: =System.ConversationId
+                      input:
+                        messages: =Local.LatestMessage
+                      output:
+                        messages: Local.LatestMessage
+                        autoSend: true
+                    - kind: GotoAction
+                      id: goto_confirm_as
+                      actionId: confirm_appt_as
+              elseActions:
+                - kind: InvokeAzureAgent
+                  id: calendar_as
+                  agent:
+                    name: va-loan-calendar-mcp
+                  conversationId: =System.ConversationId
+                  input:
+                    messages: =Local.LatestMessage
+                  output:
+                    messages: Local.LatestMessage
+                    autoSend: true
 
-        # ── Calculator + Scheduler ────────────────────────────────
+        # ══════════════════════════════════════════════════════════
+        # Calculator + Scheduler
+        # ══════════════════════════════════════════════════════════
         - id: calculator_scheduler
           condition: =And(Local.Route.needs_calculator, Local.Route.needs_scheduler)
           actions:
-            - kind: InvokeAzureAgent
-              id: calculator_cs
-              agent:
-                name: va-loan-calculator-mcp
-              conversationId: =System.ConversationId
-              input:
-                messages: =Local.LatestMessage
-              output:
-                messages: Local.LatestMessage
-                autoSend: false
+            # ── Calculator HIL ──────────────────────────────────
+            - kind: Question
+              id: ask_loan_details_cs
+              prompt: "To calculate your refinance savings, I need five pieces of information:\n1. Current loan balance (e.g. $320,000)\n2. Current interest rate (e.g. 6.8%)\n3. New/quoted interest rate (e.g. 6.1%)\n4. Remaining term in years (e.g. 27)\n5. VA funding fee exempt? (yes if service-connected disability)\n\nPlease provide all five, or say 'skip' to move on without a calculation."
+              entity: StringPrebuiltEntity
+              variable: Local.LoanDetails
+            - kind: ConditionGroup
+              id: check_skip_calc_cs
+              conditions:
+                - id: skip_calc_cs
+                  condition: '=Or(Contains(Lower(Local.LoanDetails), "skip"), Contains(Lower(Local.LoanDetails), "move on"), Contains(Lower(Local.LoanDetails), "no calc"), Contains(Lower(Local.LoanDetails), "never mind"), Contains(Lower(Local.LoanDetails), "don''t calculate"), Contains(Lower(Local.LoanDetails), "forget it"), Contains(Lower(Local.LoanDetails), "use defaults"), Contains(Lower(Local.LoanDetails), "default"))'
+                  actions:
+                    - kind: SendActivity
+                      id: calc_skipped_cs
+                      activity: "No problem — skipping the refinance calculation. Let me get your appointment set up."
+              elseActions:
+                - kind: SetVariable
+                  id: enrich_calc_cs
+                  variable: Local.LatestMessage
+                  value: '=UserMessage(Concatenate(System.LastMessageText, " [Borrower-provided loan details: ", Local.LoanDetails, ". Use these details for the refinance calculation. Extract current_rate, new_rate, balance, remaining_term, and funding_fee_exempt from the borrower response above.]"))'
+                - kind: SetVariable
+                  id: init_calc_retry_cs
+                  variable: Local.CalcRetryCount
+                  value: =0
+                - kind: InvokeAzureAgent
+                  id: calculator_cs
+                  agent:
+                    name: va-loan-calculator-mcp
+                  conversationId: =System.ConversationId
+                  input:
+                    messages: =Local.LatestMessage
+                  output:
+                    messages: Local.LatestMessage
+                    autoSend: true
+                - kind: Question
+                  id: calc_followup_cs
+                  prompt: "Does the calculation look right? If the calculator asked for more details, please provide them now. You can also say 'skip' to move on."
+                  entity: StringPrebuiltEntity
+                  variable: Local.CalcFollowup
+                - kind: ConditionGroup
+                  id: check_calc_followup_cs
+                  conditions:
+                    - id: calc_good_cs
+                      condition: '=Or(Contains(Lower(Local.CalcFollowup), "yes"), Contains(Lower(Local.CalcFollowup), "looks good"), Contains(Lower(Local.CalcFollowup), "correct"), Contains(Lower(Local.CalcFollowup), "right"), Contains(Lower(Local.CalcFollowup), "great"), Contains(Lower(Local.CalcFollowup), "perfect"), Contains(Lower(Local.CalcFollowup), "continue"))'
+                      actions: []
+                    - id: calc_skip_followup_cs
+                      condition: '=Or(Contains(Lower(Local.CalcFollowup), "skip"), Contains(Lower(Local.CalcFollowup), "move on"), Contains(Lower(Local.CalcFollowup), "no calc"), Contains(Lower(Local.CalcFollowup), "never mind"), Contains(Lower(Local.CalcFollowup), "don''t calculate"), Contains(Lower(Local.CalcFollowup), "forget it"), Contains(Lower(Local.CalcFollowup), "use defaults"), Contains(Lower(Local.CalcFollowup), "default"))'
+                      actions:
+                        - kind: SendActivity
+                          id: calc_skipped_followup_cs
+                          activity: "Understood — moving on to scheduling your appointment."
+                  elseActions:
+                    - id: calc_retry_cs
+                      kind: ConditionGroup
+                      conditions:
+                        - id: calc_retry_ok_cs
+                          condition: =Local.CalcRetryCount < 3
+                          actions:
+                            - kind: SetVariable
+                              id: inc_calc_retry_cs
+                              variable: Local.CalcRetryCount
+                              value: =Local.CalcRetryCount + 1
+                            - kind: SetVariable
+                              id: enrich_calc_retry_cs
+                              variable: Local.LatestMessage
+                              value: '=UserMessage(Concatenate(System.LastMessageText, " [Additional borrower details: ", Local.CalcFollowup, ". Use ALL borrower-provided details to call the refi_savings_calculator tool now.]"))'
+                            - kind: InvokeAzureAgent
+                              id: calculator_retry_cs
+                              agent:
+                                name: va-loan-calculator-mcp
+                              conversationId: =System.ConversationId
+                              input:
+                                messages: =Local.LatestMessage
+                              output:
+                                messages: Local.LatestMessage
+                                autoSend: true
+                            - kind: GotoAction
+                              id: goto_calc_followup_cs
+                              actionId: calc_followup_cs
+                      elseActions:
+                        - kind: SendActivity
+                          id: calc_max_retry_cs
+                          activity: "I wasn't able to complete the calculation after several attempts. Let me continue with scheduling your appointment."
+            # ── Scheduler ───────────────────────────────────────
             - kind: InvokeAzureAgent
               id: scheduler_cs
               agent:
@@ -154,19 +493,65 @@ trigger:
                 messages: =Local.LatestMessage
               output:
                 messages: Local.LatestMessage
-                autoSend: false
-            - kind: InvokeAzureAgent
-              id: calendar_cs
-              agent:
-                name: va-loan-calendar-mcp
-              conversationId: =System.ConversationId
-              input:
-                messages: =Local.LatestMessage
-              output:
-                messages: Local.LatestMessage
                 autoSend: true
+            # ── Scheduler HIL: confirm / reschedule / decline ───
+            - kind: SetVariable
+              id: init_resched_count_cs
+              variable: Local.RescheduleCount
+              value: =0
+            - kind: Question
+              id: confirm_appt_cs
+              prompt: "Does this appointment work for you? I can add it to your calendar, reschedule it, or skip the calendar event."
+              entity: StringPrebuiltEntity
+              variable: Local.ApptConfirmation
+            - kind: ConditionGroup
+              id: check_appt_cs
+              conditions:
+                - id: appt_decline_cs
+                  condition: '=Or(Contains(Lower(Local.ApptConfirmation), "no thank"), Contains(Lower(Local.ApptConfirmation), "skip"), Contains(Lower(Local.ApptConfirmation), "don''t"), Contains(Lower(Local.ApptConfirmation), "cancel"), Contains(Lower(Local.ApptConfirmation), "decline"), Contains(Lower(Local.ApptConfirmation), "not now"))'
+                  actions:
+                    - kind: SendActivity
+                      id: skip_calendar_cs
+                      activity: "No problem — your appointment is still confirmed with the details above. I've skipped the calendar event. Is there anything else I can help with?"
+                - id: appt_reschedule_cs
+                  condition: '=And(Local.RescheduleCount < 3, Or(Contains(Lower(Local.ApptConfirmation), "reschedule"), Contains(Lower(Local.ApptConfirmation), "different"), Contains(Lower(Local.ApptConfirmation), "change"), Contains(Lower(Local.ApptConfirmation), "instead"), Contains(Lower(Local.ApptConfirmation), "another"), Contains(Lower(Local.ApptConfirmation), "monday"), Contains(Lower(Local.ApptConfirmation), "tuesday"), Contains(Lower(Local.ApptConfirmation), "wednesday"), Contains(Lower(Local.ApptConfirmation), "thursday"), Contains(Lower(Local.ApptConfirmation), "friday"), Contains(Lower(Local.ApptConfirmation), "saturday"), Contains(Lower(Local.ApptConfirmation), "morning"), Contains(Lower(Local.ApptConfirmation), "afternoon"), Contains(Lower(Local.ApptConfirmation), "earlier"), Contains(Lower(Local.ApptConfirmation), "later")))'
+                  actions:
+                    - kind: SetVariable
+                      id: inc_resched_cs
+                      variable: Local.RescheduleCount
+                      value: =Local.RescheduleCount + 1
+                    - kind: SetVariable
+                      id: enrich_resched_cs
+                      variable: Local.LatestMessage
+                      value: '=UserMessage(Concatenate("RESCHEDULE REQUEST: The Veteran wants to change their appointment. Their previous appointment details are in the conversation above. New preference: ", Local.ApptConfirmation, ". Call the appointment_scheduler tool with the day and time the Veteran specified. You MUST use a DIFFERENT day or time than the previous appointment."))'
+                    - kind: InvokeAzureAgent
+                      id: scheduler_resched_cs
+                      agent:
+                        name: va-loan-scheduler-mcp
+                      conversationId: =System.ConversationId
+                      input:
+                        messages: =Local.LatestMessage
+                      output:
+                        messages: Local.LatestMessage
+                        autoSend: true
+                    - kind: GotoAction
+                      id: goto_confirm_cs
+                      actionId: confirm_appt_cs
+              elseActions:
+                - kind: InvokeAzureAgent
+                  id: calendar_cs
+                  agent:
+                    name: va-loan-calendar-mcp
+                  conversationId: =System.ConversationId
+                  input:
+                    messages: =Local.LatestMessage
+                  output:
+                    messages: Local.LatestMessage
+                    autoSend: true
 
-        # ── Advisor only ──────────────────────────────────────────
+        # ══════════════════════════════════════════════════════════
+        # Advisor only
+        # ══════════════════════════════════════════════════════════
         - id: advisor_only
           condition: =Local.Route.needs_advisor
           actions:
@@ -181,22 +566,99 @@ trigger:
                 messages: Local.LatestMessage
                 autoSend: true
 
-        # ── Calculator only ───────────────────────────────────────
+        # ══════════════════════════════════════════════════════════
+        # Calculator only
+        # ══════════════════════════════════════════════════════════
         - id: calculator_only
           condition: =Local.Route.needs_calculator
           actions:
-            - kind: InvokeAzureAgent
-              id: calculator_solo
-              agent:
-                name: va-loan-calculator-mcp
-              conversationId: =System.ConversationId
-              input:
-                messages: =Local.LatestMessage
-              output:
-                messages: Local.LatestMessage
-                autoSend: true
+            # ── Calculator HIL ──────────────────────────────────
+            - kind: Question
+              id: ask_loan_details_solo
+              prompt: "To calculate your refinance savings, I need five pieces of information:\n1. Current loan balance (e.g. $320,000)\n2. Current interest rate (e.g. 6.8%)\n3. New/quoted interest rate (e.g. 6.1%)\n4. Remaining term in years (e.g. 27)\n5. VA funding fee exempt? (yes if service-connected disability)\n\nPlease provide all five, or say 'skip' to move on without a calculation."
+              entity: StringPrebuiltEntity
+              variable: Local.LoanDetails
+            - kind: ConditionGroup
+              id: check_skip_calc_solo
+              conditions:
+                - id: skip_calc_solo
+                  condition: '=Or(Contains(Lower(Local.LoanDetails), "skip"), Contains(Lower(Local.LoanDetails), "move on"), Contains(Lower(Local.LoanDetails), "no calc"), Contains(Lower(Local.LoanDetails), "never mind"), Contains(Lower(Local.LoanDetails), "don''t calculate"), Contains(Lower(Local.LoanDetails), "forget it"), Contains(Lower(Local.LoanDetails), "use defaults"), Contains(Lower(Local.LoanDetails), "default"))'
+                  actions:
+                    - kind: SendActivity
+                      id: calc_skipped_solo
+                      activity: "No problem — skipping the refinance calculation. Is there anything else I can help with?"
+              elseActions:
+                - kind: SetVariable
+                  id: enrich_calc_solo
+                  variable: Local.LatestMessage
+                  value: '=UserMessage(Concatenate(System.LastMessageText, " [Borrower-provided loan details: ", Local.LoanDetails, ". Use these details for the refinance calculation. Extract current_rate, new_rate, balance, remaining_term, and funding_fee_exempt from the borrower response above.]"))'
+                - kind: SetVariable
+                  id: init_calc_retry_solo
+                  variable: Local.CalcRetryCount
+                  value: =0
+                - kind: InvokeAzureAgent
+                  id: calculator_solo
+                  agent:
+                    name: va-loan-calculator-mcp
+                  conversationId: =System.ConversationId
+                  input:
+                    messages: =Local.LatestMessage
+                  output:
+                    messages: Local.LatestMessage
+                    autoSend: true
+                - kind: Question
+                  id: calc_followup_solo
+                  prompt: "Does the calculation look right? If the calculator asked for more details, please provide them now. You can also say 'skip' to move on."
+                  entity: StringPrebuiltEntity
+                  variable: Local.CalcFollowup
+                - kind: ConditionGroup
+                  id: check_calc_followup_solo
+                  conditions:
+                    - id: calc_good_solo
+                      condition: '=Or(Contains(Lower(Local.CalcFollowup), "yes"), Contains(Lower(Local.CalcFollowup), "looks good"), Contains(Lower(Local.CalcFollowup), "correct"), Contains(Lower(Local.CalcFollowup), "right"), Contains(Lower(Local.CalcFollowup), "great"), Contains(Lower(Local.CalcFollowup), "perfect"), Contains(Lower(Local.CalcFollowup), "continue"))'
+                      actions: []
+                    - id: calc_skip_followup_solo
+                      condition: '=Or(Contains(Lower(Local.CalcFollowup), "skip"), Contains(Lower(Local.CalcFollowup), "move on"), Contains(Lower(Local.CalcFollowup), "no calc"), Contains(Lower(Local.CalcFollowup), "never mind"), Contains(Lower(Local.CalcFollowup), "don''t calculate"), Contains(Lower(Local.CalcFollowup), "forget it"), Contains(Lower(Local.CalcFollowup), "use defaults"), Contains(Lower(Local.CalcFollowup), "default"))'
+                      actions:
+                        - kind: SendActivity
+                          id: calc_skipped_followup_solo
+                          activity: "Understood — moving on without completing the calculation."
+                  elseActions:
+                    - id: calc_retry_solo
+                      kind: ConditionGroup
+                      conditions:
+                        - id: calc_retry_ok_solo
+                          condition: =Local.CalcRetryCount < 3
+                          actions:
+                            - kind: SetVariable
+                              id: inc_calc_retry_solo
+                              variable: Local.CalcRetryCount
+                              value: =Local.CalcRetryCount + 1
+                            - kind: SetVariable
+                              id: enrich_calc_retry_solo
+                              variable: Local.LatestMessage
+                              value: '=UserMessage(Concatenate(System.LastMessageText, " [Additional borrower details: ", Local.CalcFollowup, ". Use ALL borrower-provided details to call the refi_savings_calculator tool now.]"))'
+                            - kind: InvokeAzureAgent
+                              id: calculator_retry_solo
+                              agent:
+                                name: va-loan-calculator-mcp
+                              conversationId: =System.ConversationId
+                              input:
+                                messages: =Local.LatestMessage
+                              output:
+                                messages: Local.LatestMessage
+                                autoSend: true
+                            - kind: GotoAction
+                              id: goto_calc_followup_solo
+                              actionId: calc_followup_solo
+                      elseActions:
+                        - kind: SendActivity
+                          id: calc_max_retry_solo
+                          activity: "I wasn't able to complete the calculation after several attempts. Is there anything else I can help with?"
 
-        # ── Scheduler only ────────────────────────────────────────
+        # ══════════════════════════════════════════════════════════
+        # Scheduler only (no calculator — no loan details HIL)
+        # ══════════════════════════════════════════════════════════
         - id: scheduler_only
           condition: =Local.Route.needs_scheduler
           actions:
@@ -209,17 +671,61 @@ trigger:
                 messages: =Local.LatestMessage
               output:
                 messages: Local.LatestMessage
-                autoSend: false
-            - kind: InvokeAzureAgent
-              id: calendar_solo
-              agent:
-                name: va-loan-calendar-mcp
-              conversationId: =System.ConversationId
-              input:
-                messages: =Local.LatestMessage
-              output:
-                messages: Local.LatestMessage
                 autoSend: true
+            # ── Scheduler HIL: confirm / reschedule / decline ───
+            - kind: SetVariable
+              id: init_resched_count_solo
+              variable: Local.RescheduleCount
+              value: =0
+            - kind: Question
+              id: confirm_appt_solo
+              prompt: "Does this appointment work for you? I can add it to your calendar, reschedule it, or skip the calendar event."
+              entity: StringPrebuiltEntity
+              variable: Local.ApptConfirmation
+            - kind: ConditionGroup
+              id: check_appt_solo
+              conditions:
+                - id: appt_decline_solo
+                  condition: '=Or(Contains(Lower(Local.ApptConfirmation), "no thank"), Contains(Lower(Local.ApptConfirmation), "skip"), Contains(Lower(Local.ApptConfirmation), "don''t"), Contains(Lower(Local.ApptConfirmation), "cancel"), Contains(Lower(Local.ApptConfirmation), "decline"), Contains(Lower(Local.ApptConfirmation), "not now"))'
+                  actions:
+                    - kind: SendActivity
+                      id: skip_calendar_solo
+                      activity: "No problem — your appointment is still confirmed with the details above. I've skipped the calendar event. Is there anything else I can help with?"
+                - id: appt_reschedule_solo
+                  condition: '=And(Local.RescheduleCount < 3, Or(Contains(Lower(Local.ApptConfirmation), "reschedule"), Contains(Lower(Local.ApptConfirmation), "different"), Contains(Lower(Local.ApptConfirmation), "change"), Contains(Lower(Local.ApptConfirmation), "instead"), Contains(Lower(Local.ApptConfirmation), "another"), Contains(Lower(Local.ApptConfirmation), "monday"), Contains(Lower(Local.ApptConfirmation), "tuesday"), Contains(Lower(Local.ApptConfirmation), "wednesday"), Contains(Lower(Local.ApptConfirmation), "thursday"), Contains(Lower(Local.ApptConfirmation), "friday"), Contains(Lower(Local.ApptConfirmation), "saturday"), Contains(Lower(Local.ApptConfirmation), "morning"), Contains(Lower(Local.ApptConfirmation), "afternoon"), Contains(Lower(Local.ApptConfirmation), "earlier"), Contains(Lower(Local.ApptConfirmation), "later")))'
+                  actions:
+                    - kind: SetVariable
+                      id: inc_resched_solo
+                      variable: Local.RescheduleCount
+                      value: =Local.RescheduleCount + 1
+                    - kind: SetVariable
+                      id: enrich_resched_solo
+                      variable: Local.LatestMessage
+                      value: '=UserMessage(Concatenate("RESCHEDULE REQUEST: The Veteran wants to change their appointment. Their previous appointment details are in the conversation above. New preference: ", Local.ApptConfirmation, ". Call the appointment_scheduler tool with the day and time the Veteran specified. You MUST use a DIFFERENT day or time than the previous appointment."))'
+                    - kind: InvokeAzureAgent
+                      id: scheduler_resched_solo
+                      agent:
+                        name: va-loan-scheduler-mcp
+                      conversationId: =System.ConversationId
+                      input:
+                        messages: =Local.LatestMessage
+                      output:
+                        messages: Local.LatestMessage
+                        autoSend: true
+                    - kind: GotoAction
+                      id: goto_confirm_solo
+                      actionId: confirm_appt_solo
+              elseActions:
+                - kind: InvokeAzureAgent
+                  id: calendar_solo
+                  agent:
+                    name: va-loan-calendar-mcp
+                  conversationId: =System.ConversationId
+                  input:
+                    messages: =Local.LatestMessage
+                  output:
+                    messages: Local.LatestMessage
+                    autoSend: true
 
       elseActions:
         - kind: SendActivity
@@ -230,4 +736,4 @@ trigger:
       id: end
 id: ""
 name: va-loan-concierge-workflow
-description: VA Loan Concierge — routes Veteran queries to advisor, calculator, scheduler, and/or calendar agents based on LLM classification.
+description: VA Loan Concierge — routes Veteran queries to advisor, calculator, scheduler, and/or calendar agents with human-in-the-loop confirmation steps.

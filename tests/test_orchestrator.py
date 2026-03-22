@@ -93,30 +93,49 @@ class TestClassifyHint:
 
 class TestDemoContextBlock:
     def test_calculator_target_includes_loan_params(self):
-        block = _demo_context_block("I want to refinance my VA loan", profile_id="marcus", target_agent="calculator")
+        block, notices = _demo_context_block("I want to refinance my VA loan", profile_id="marcus", target_agent="calculator")
         assert "6.8" in block
         assert "6.1" in block
         assert "320000" in block
+        assert notices == []  # marcus has all fields — no fallbacks
 
     def test_scheduler_target_includes_appointment_params(self):
-        block = _demo_context_block("Book a call for Thursday", profile_id="marcus", target_agent="scheduler")
+        block, notices = _demo_context_block("Book a call for Thursday", profile_id="marcus", target_agent="scheduler")
         assert "appointment_scheduler" in block
 
     def test_calculator_target_excludes_scheduling(self):
-        block = _demo_context_block("Book a call for Thursday", profile_id="marcus", target_agent="calculator")
+        block, notices = _demo_context_block("Book a call for Thursday", profile_id="marcus", target_agent="calculator")
         assert block == ""
 
     def test_scheduler_target_excludes_loan_params(self):
-        block = _demo_context_block("I want to refinance my VA loan", profile_id="marcus", target_agent="scheduler")
+        block, notices = _demo_context_block("I want to refinance my VA loan", profile_id="marcus", target_agent="scheduler")
         assert block == ""
 
     def test_unrelated_query_returns_empty(self):
-        block = _demo_context_block("What is the VA loan funding fee waiver?", profile_id="marcus", target_agent="calculator")
+        block, notices = _demo_context_block("What is the VA loan funding fee waiver?", profile_id="marcus", target_agent="calculator")
         assert block == ""
 
     def test_funding_fee_exempt_flag_included(self):
-        block = _demo_context_block("Calculate my IRRRL savings", profile_id="marcus", target_agent="calculator")
+        block, notices = _demo_context_block("Calculate my IRRRL savings", profile_id="marcus", target_agent="calculator")
         assert "funding_fee_exempt" in block
+
+    def test_fallback_notices_when_fields_missing(self):
+        """When profile fields are missing, notices list the defaults used."""
+        block, notices = _demo_context_block("Calculate my IRRRL savings", profile_id="marcus", target_agent="calculator")
+        # marcus has all fields — no notices
+        assert notices == []
+
+    def test_fallback_notices_for_incomplete_profile(self):
+        """A profile with current_rate but missing other fields triggers notices."""
+        from unittest.mock import patch
+        incomplete = {"current_rate": 7.0}  # missing balance, new_rate, remaining_term, funding_fee_exempt
+        with patch.dict("profiles.DEMO_PROFILES", {"incomplete": incomplete}):
+            block, notices = _demo_context_block("Calculate my savings", profile_id="incomplete", target_agent="calculator")
+            assert len(notices) == 4
+            assert any("balance" in n for n in notices)
+            assert any("rate" in n.lower() for n in notices)
+            assert any("term" in n.lower() for n in notices)
+            assert any("exemption" in n.lower() for n in notices)
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +192,8 @@ def _make_orchestrator_with_mocks(
     return orch
 
 
-async def collect_events(orch: Orchestrator, query: str) -> list[dict]:
-    return [e async for e in orch.run(query)]
+async def collect_events(orch: Orchestrator, query: str, profile_id: str | None = None) -> list[dict]:
+    return [e async for e in orch.run(query, profile_id=profile_id)]
 
 
 class TestOrchestratorRun:
@@ -227,7 +246,7 @@ class TestOrchestratorRun:
             {"type": "_calculator_text", "text": "Your savings are $142/month."},
         )
         orch = _make_orchestrator_with_mocks(calculator_events=calculator_events)
-        events = await collect_events(orch, "How much would I save by refinancing?")
+        events = await collect_events(orch, "How much would I save by refinancing?", profile_id="marcus")
         types = [e["type"] for e in events]
         assert "calculator_start" in types
         assert "calculator_tool_call" in types
@@ -243,7 +262,7 @@ class TestOrchestratorRun:
             {"type": "_scheduler_text", "text": "Your appointment is confirmed."},
         )
         orch = _make_orchestrator_with_mocks(scheduler_events=scheduler_events)
-        events = await collect_events(orch, "Book a call for Thursday")
+        events = await collect_events(orch, "Book a call for Thursday", profile_id="marcus")
         types = [e["type"] for e in events]
         assert "scheduler_start" in types
         assert "scheduler_tool_call" in types
@@ -266,7 +285,7 @@ class TestOrchestratorRun:
             {"type": "_calculator_text", "text": "Monthly savings: $142."},
         )
         orch = _make_orchestrator_with_mocks(calculator_events=calculator_events)
-        events = await collect_events(orch, "How much would I save by refinancing?")
+        events = await collect_events(orch, "How much would I save by refinancing?", profile_id="marcus")
         partials = [e for e in events if e["type"] == "partial_response"]
         assert len(partials) == 1
         assert "Monthly savings: $142." in partials[0]["content"]
@@ -292,8 +311,9 @@ class TestOrchestratorRun:
             calculator_events=calculator_events,
             scheduler_events=scheduler_events,
         )
-        events = await collect_events(orch, query)
+        events = await collect_events(orch, query, profile_id="marcus")
         partials = [e for e in events if e["type"] == "partial_response"]
+        # 3 agent partials; scheduler ends with await_input (no calendar partial)
         assert len(partials) == 3
         assert partials[0]["agent"] == "advisor"
         assert partials[1]["agent"] == "calculator"
@@ -322,7 +342,7 @@ class TestOrchestratorRun:
             calculator_events=calculator_events,
             scheduler_events=scheduler_events,
         )
-        events = await collect_events(orch, query)
+        events = await collect_events(orch, query, profile_id="marcus")
         handoffs = [e for e in events if e["type"] == "handoff"]
         assert len(handoffs) >= 1
 
@@ -419,3 +439,212 @@ class TestLlmClassify:
         assert orch._orchestrator_version is None
         advisor, calculator, scheduler = await orch._llm_classify("Book a call for Thursday")
         assert scheduler is True
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop tests
+# ---------------------------------------------------------------------------
+
+class TestHumanInTheLoop:
+    async def test_no_profile_pauses_before_calculator(self):
+        """Without a profile, orchestrator pauses for info before calculator."""
+        calculator_events = (
+            {"type": "_calculator_text", "text": "Savings: $142."},
+        )
+        orch = _make_orchestrator_with_mocks(calculator_events=calculator_events)
+        # No profile_id → should pause with await_input
+        events = await collect_events(orch, "How much would I save by refinancing?")
+        types = [e["type"] for e in events]
+        assert "await_input" in types
+        # Calculator should NOT have run
+        assert "calculator_start" not in types
+        assert "_calculator_text" not in types
+
+    async def test_profile_skips_hil_pause(self):
+        """With a profile, orchestrator goes straight to calculator."""
+        calculator_events = (
+            {"type": "calculator_start", "message": "Calculator activated"},
+            {"type": "_calculator_text", "text": "Savings: $142."},
+        )
+        orch = _make_orchestrator_with_mocks(calculator_events=calculator_events)
+        events = await collect_events(orch, "How much would I save by refinancing?", profile_id="marcus")
+        types = [e["type"] for e in events]
+        assert "await_input" not in types
+        assert "calculator_start" in types
+
+    async def test_scheduler_pauses_for_appointment_confirmation(self):
+        """After scheduler runs, orchestrator pauses for appointment confirmation."""
+        scheduler_events = (
+            {"type": "scheduler_start", "message": "Scheduler activated"},
+            {"type": "_scheduler_text", "text": "Appointment confirmed."},
+        )
+        orch = _make_orchestrator_with_mocks(scheduler_events=scheduler_events)
+        # Make the scheduler return appointment data so the HIL check triggers
+        orch._scheduler.last_response = MagicMock()
+        orch._scheduler.extract_appointment_result = MagicMock(
+            return_value='{"date": "Thu Mar 26", "time": "2:00 PM", "ref": "LOAN-84921"}'
+        )
+        # Use marcus profile to skip the profile-info pause
+        events = await collect_events(orch, "Book a call for Thursday", profile_id="marcus")
+        types = [e["type"] for e in events]
+        assert "await_input" in types
+        await_evt = next(e for e in events if e["type"] == "await_input")
+        assert await_evt["input_type"] == "appointment_confirmation"
+        assert "conversation_id" in await_evt
+
+    async def test_await_input_has_suggestions(self):
+        """await_input events include suggestion buttons."""
+        calculator_events = (
+            {"type": "_calculator_text", "text": "Savings."},
+        )
+        orch = _make_orchestrator_with_mocks(calculator_events=calculator_events)
+        events = await collect_events(orch, "How much would I save?")
+        await_evt = next(e for e in events if e["type"] == "await_input")
+        assert "suggestions" in await_evt
+        assert len(await_evt["suggestions"]) > 0
+
+    async def test_keyword_classify_confirmation(self):
+        orch = Orchestrator()
+        assert orch._keyword_classify_confirmation("Yes, add to my calendar") == "confirm"
+        assert orch._keyword_classify_confirmation("Can we do Friday instead?") == "reschedule"
+        assert orch._keyword_classify_confirmation("No thanks") == "decline"
+        assert orch._keyword_classify_confirmation("Looks good") == "confirm"
+
+    async def test_scheduler_only_no_profile_skips_hil(self):
+        """Scheduler-only flow should NOT pause for loan details even without a profile."""
+        scheduler_events = (
+            {"type": "scheduler_start", "message": "Scheduler activated"},
+            {"type": "_scheduler_text", "text": "Appointment confirmed."},
+        )
+        orch = _make_orchestrator_with_mocks(scheduler_events=scheduler_events)
+        # No profile, scheduler-only query — should NOT get profile_info pause
+        events = await collect_events(orch, "Book a call for Thursday")
+        types = [e["type"] for e in events]
+        # Should NOT pause for profile info
+        profile_pauses = [e for e in events if e.get("input_type") == "profile_info"]
+        assert len(profile_pauses) == 0
+        # Scheduler should have run
+        assert "scheduler_start" in types
+
+    async def test_resume_with_user_details_skips_demo_context(self):
+        """When user provides loan details via HIL, calculator should NOT get the
+        'no existing VA loan' demo context block."""
+        from api.conversation_state import get_conversation
+
+        calculator_events = (
+            {"type": "calculator_start", "message": "Calculator activated"},
+            {"type": "calculator_tool_call", "message": "refi_savings_calculator", "inputs": {}},
+            {"type": "_calculator_text", "text": "Savings: $142."},
+        )
+        orch = _make_orchestrator_with_mocks(calculator_events=calculator_events)
+        # First call: no profile → pauses for profile_info
+        events = await collect_events(orch, "How much would I save by refinancing?")
+        await_evt = next(e for e in events if e["type"] == "await_input")
+        conv_id = await_evt["conversation_id"]
+
+        # Verify the state was saved
+        state = get_conversation(conv_id)
+        assert state is not None
+        assert state.pending_action == "awaiting_profile_info"
+
+        # Resume with user-provided details
+        events2 = [e async for e in orch.run(
+            "Balance $320,000, current rate 6.8%, new rate 6.1%, 27 years left, fee exempt",
+            conversation_id=conv_id,
+        )]
+        types2 = [e["type"] for e in events2]
+        # Calculator should have run this time
+        assert "calculator_start" in types2
+        # Verify state flag was set
+        state2 = get_conversation(conv_id)
+        if state2:
+            assert state2.user_provided_details is True
+
+    async def test_calculator_retry_when_tool_not_called(self):
+        """If the calculator LLM asks follow-up questions (no tool call),
+        the orchestrator should pause for a calculator retry."""
+        from api.conversation_state import get_conversation
+
+        # First pass: calculator returns text but NO tool_call → asking questions
+        calculator_events_incomplete = (
+            {"type": "calculator_start", "message": "Calculator activated"},
+            {"type": "_calculator_text", "text": "I need your quoted rate to proceed."},
+        )
+        # Second pass: calculator calls the tool successfully
+        calculator_events_complete = (
+            {"type": "calculator_start", "message": "Calculator activated"},
+            {"type": "calculator_tool_call", "message": "refi_savings_calculator", "inputs": {}},
+            {"type": "_calculator_text", "text": "Savings: $142."},
+        )
+
+        orch = _make_orchestrator_with_mocks(
+            calculator_events=calculator_events_incomplete,
+        )
+        # Step 1: no profile → pauses for profile_info
+        events = await collect_events(orch, "How much would I save by refinancing?")
+        await_evt = next(e for e in events if e["type"] == "await_input")
+        conv_id = await_evt["conversation_id"]
+        assert await_evt["input_type"] == "profile_info"
+
+        # Step 2: provide PARTIAL details → calculator runs but doesn't call tool
+        events2 = [e async for e in orch.run(
+            "Balance $400K, current rate 7.1%, 29 years remaining",
+            conversation_id=conv_id,
+        )]
+        types2 = [e["type"] for e in events2]
+        # Should show calculator's question then pause for retry
+        assert "partial_response" in types2
+        retry_events = [e for e in events2 if e.get("input_type") == "calculator_retry"]
+        assert len(retry_events) == 1
+
+        # Step 3: provide missing details → swap in complete calculator events
+        async def _calc_run_complete(query):
+            for event in calculator_events_complete:
+                yield event
+        orch._calculator.run = _calc_run_complete
+
+        events3 = [e async for e in orch.run(
+            "New rate 6.3%, not fee exempt",
+            conversation_id=conv_id,
+        )]
+        types3 = [e["type"] for e in events3]
+        assert "calculator_tool_call" in types3
+        assert "complete" in types3
+
+    async def test_calculator_retry_skip(self):
+        """User can say 'skip' during calculator retry to bypass calculation."""
+        from api.conversation_state import get_conversation
+
+        calculator_events_incomplete = (
+            {"type": "calculator_start", "message": "Calculator activated"},
+            {"type": "_calculator_text", "text": "I need your quoted rate."},
+        )
+        orch = _make_orchestrator_with_mocks(
+            calculator_events=calculator_events_incomplete,
+        )
+        # Step 1: no profile → pauses for profile_info
+        events = await collect_events(orch, "How much would I save by refinancing?")
+        conv_id = next(e for e in events if e["type"] == "await_input")["conversation_id"]
+
+        # Step 2: provide partial details → calculator retry pause
+        events2 = [e async for e in orch.run(
+            "Balance $400K, rate 7.1%",
+            conversation_id=conv_id,
+        )]
+        retry_events = [e for e in events2 if e.get("input_type") == "calculator_retry"]
+        assert len(retry_events) == 1
+        # Verify skip suggestion is offered
+        assert any("skip" in s.lower() for s in retry_events[0]["suggestions"])
+
+        # Step 3: user says "skip" → should complete without re-running calculator
+        events3 = [e async for e in orch.run(
+            "Skip the calculation",
+            conversation_id=conv_id,
+        )]
+        types3 = [e["type"] for e in events3]
+        assert "calculator_note" in types3
+        note_msgs = [e["message"] for e in events3 if e["type"] == "calculator_note"]
+        assert any("skipped" in m.lower() for m in note_msgs)
+        # Should NOT have re-run calculator
+        assert "calculator_start" not in types3
+        assert "complete" in types3

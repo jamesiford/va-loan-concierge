@@ -96,7 +96,7 @@ def _profile_context_block(profile_id: str | None) -> str:
 
 def _demo_context_block(
     query: str, profile_id: str | None = None, target_agent: str = "calculator"
-) -> str:
+) -> tuple[str, list[str]]:
     """
     Build a structured tool-parameter block for a specific agent.
 
@@ -106,10 +106,24 @@ def _demo_context_block(
 
     Uses the selected borrower profile's loan data when available;
     falls back to hardcoded demo defaults otherwise.
+
+    Returns:
+        (context_string, fallback_notices) — the context to append to the
+        query, plus a list of human-readable notices about any default
+        values that were substituted for missing profile data.
     """
     q = query.lower()
     p = DEMO_PROFILES.get(profile_id or "", {})
     parts: list[str] = []
+    notices: list[str] = []
+
+    # Default values used when a profile field is missing
+    _DEFAULTS = {
+        "balance": 320_000,
+        "new_rate": 6.1,
+        "remaining_term": 27,
+        "funding_fee_exempt": True,
+    }
 
     if target_agent == "calculator":
         current_rate = p.get("current_rate")
@@ -121,10 +135,21 @@ def _demo_context_block(
                     "cannot be used. Inform them that IRRRL refinancing requires an existing VA loan.]"
                 )
             else:
-                balance = p.get("balance", 320000)
-                new_rate = p.get("new_rate", 6.1)
-                remaining_term = p.get("remaining_term", 27)
-                funding_fee_exempt = p.get("funding_fee_exempt", True)
+                balance = p.get("balance", _DEFAULTS["balance"])
+                new_rate = p.get("new_rate", _DEFAULTS["new_rate"])
+                remaining_term = p.get("remaining_term", _DEFAULTS["remaining_term"])
+                funding_fee_exempt = p.get("funding_fee_exempt", _DEFAULTS["funding_fee_exempt"])
+
+                # Track which values fell back to defaults
+                if "balance" not in p:
+                    notices.append(f"Using default loan balance: ${_DEFAULTS['balance']:,}")
+                if "new_rate" not in p:
+                    notices.append(f"Using default quoted rate: {_DEFAULTS['new_rate']}%")
+                if "remaining_term" not in p:
+                    notices.append(f"Using default remaining term: {_DEFAULTS['remaining_term']} years")
+                if "funding_fee_exempt" not in p:
+                    notices.append(f"Using default fee exemption: {'exempt' if _DEFAULTS['funding_fee_exempt'] else 'not exempt'}")
+
                 parts.append(
                     "[Loan parameters for the refinance calculation — "
                     f"pass these exactly to the refi_savings_calculator:\n"
@@ -148,4 +173,5 @@ def _demo_context_block(
                 f"Set appointment_type to '{appt_type}'.]"
             )
 
-    return "\n\n" + "\n".join(parts) if parts else ""
+    context = "\n\n" + "\n".join(parts) if parts else ""
+    return context, notices

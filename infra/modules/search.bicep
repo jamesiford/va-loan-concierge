@@ -24,6 +24,7 @@ resource search 'Microsoft.Search/searchServices@2024-06-01-preview' = {
     partitionCount: 1
     replicaCount: 1
     publicNetworkAccess: 'enabled'
+    semanticSearch: 'free'
     authOptions: {
       aadOrApiKey: {
         aadAuthFailureMode: 'http401WithBearerChallenge'

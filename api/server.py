@@ -16,11 +16,13 @@ Run with:
 import json
 import logging
 import os
+import pathlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from dotenv import load_dotenv
@@ -79,16 +81,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow the Vite dev server (port 5173/5174) and any production origin.
-# Tighten allow_origins for production deployments.
+# CORS — allow the Vite dev server and the production App Service origin.
+# In production the static files are served from the same origin, so CORS
+# is not needed — but keeping localhost allows local dev to work unchanged.
+_cors_origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+]
+_web_app_origin = os.environ.get("WEB_APP_ORIGIN")
+if _web_app_origin:
+    _cors_origins.append(_web_app_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-    ],
+    allow_origins=_cors_origins,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -101,6 +109,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     query: str
     profile_id: str | None = None
+    conversation_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +180,11 @@ async def chat(request: ChatRequest):
 
     async def event_stream():
         try:
-            async for event in orchestrator.run(query, profile_id=request.profile_id):
+            async for event in orchestrator.run(
+                query,
+                profile_id=request.profile_id,
+                conversation_id=request.conversation_id,
+            ):
                 yield _sse_frame(event)
         except Exception as exc:
             logger.exception("server: unhandled error during orchestration")
@@ -190,3 +203,16 @@ def _sse_headers() -> dict:
         "X-Accel-Buffering": "no",   # prevents nginx/proxy from buffering the stream
         "Connection": "keep-alive",
     }
+
+
+# ---------------------------------------------------------------------------
+# Static files — serve React production build (Phase 5)
+# ---------------------------------------------------------------------------
+# Must be AFTER all API route definitions so /api/* routes take priority.
+# The html=True parameter serves index.html as fallback for SPA client-side
+# routing. In local dev (no static/ dir), this mount is simply skipped.
+# ---------------------------------------------------------------------------
+
+_static_dir = pathlib.Path(__file__).resolve().parent.parent / "static"
+if _static_dir.is_dir():
+    app.mount("/", StaticFiles(directory=str(_static_dir), html=True), name="static")

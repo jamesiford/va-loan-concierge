@@ -11,6 +11,12 @@
 //
 // No separate Hub, Azure OpenAI, Storage, or Key Vault resources needed
 // for the Foundry layer. Storage is only used by the Function App.
+//
+// MANUAL STEP (after azd up):
+//   Work IQ Calendar connection must be configured in the Foundry portal.
+//   Requires M365 Copilot license and interactive OAuth consent — cannot be
+//   automated. See README.md "Configure Work IQ Calendar" section.
+//   The demo works without it (calendar step is skipped).
 // ---------------------------------------------------------------------------
 
 targetScope = 'subscription'
@@ -32,14 +38,23 @@ param environmentName string
 @description('Azure region — must support Foundry, AI Search, OpenAI, and Functions')
 param location string
 
-@description('GPT model to deploy (e.g. gpt-4o)')
-param modelName string = 'gpt-4o'
+@description('GPT model to deploy (e.g. gpt-4.1)')
+param modelName string = 'gpt-4.1'
 
 @description('GPT model version')
-param modelVersion string = '2024-11-20'
+param modelVersion string = '2025-04-14'
 
 @description('GPT deployment SKU capacity (in thousands of tokens per minute)')
 param modelCapacity int = 30
+
+@description('Embedding model for vector search in the knowledge base')
+param embeddingModelName string = 'text-embedding-3-small'
+
+@description('Embedding model version')
+param embeddingModelVersion string = '1'
+
+@description('Embedding deployment SKU capacity (in thousands of tokens per minute)')
+param embeddingCapacity int = 30
 
 @description('AI Search SKU')
 @allowed(['basic', 'standard', 'standard2'])
@@ -96,6 +111,9 @@ module aiServices 'modules/ai-services.bicep' = {
     modelName: modelName
     modelVersion: modelVersion
     modelCapacity: modelCapacity
+    embeddingModelName: embeddingModelName
+    embeddingModelVersion: embeddingModelVersion
+    embeddingCapacity: embeddingCapacity
     searchId: search.outputs.searchId
     searchEndpoint: search.outputs.searchEndpoint
   }
@@ -114,6 +132,25 @@ module aiProject 'modules/ai-project.bicep' = {
 }
 
 // ── Level 2: Function App for MCP server ────────────────────────────────────
+
+module webApp 'modules/web-app.bicep' = {
+  name: 'webApp'
+  scope: rg
+  params: {
+    environmentName: environmentName
+    location: location
+    appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+    foundryProjectEndpoint: aiProject.outputs.projectEndpoint
+    foundryModelDeployment: modelName
+    azureSubscriptionId: subscription().subscriptionId
+    foundryProjectResourceId: aiProject.outputs.projectId
+    advisorSearchEndpoint: search.outputs.searchEndpoint
+    mcpToolsEndpoint: functionApp.outputs.functionAppUrl
+    // Connection names (ADVISOR_MCP_CONNECTION, MCP_TOOLS_CONNECTION, etc.) are
+    // set by the postprovision hook — empty at first provision, pushed to App
+    // Settings by postdeploy hook via `az webapp config appsettings set`.
+  }
+}
 
 module functionApp 'modules/function-app.bicep' = {
   name: 'functionApp'
@@ -140,6 +177,7 @@ module rbac 'modules/rbac.bicep' = {
     storageAccountId: storage.outputs.storageAccountId
     projectId: aiProject.outputs.projectId
     userPrincipalId: principalId
+    webAppPrincipalId: webApp.outputs.webAppPrincipalId
   }
 }
 
@@ -154,6 +192,9 @@ output FOUNDRY_MODEL_DEPLOYMENT string = modelName
 output AZURE_SUBSCRIPTION_ID string = subscription().subscriptionId
 output FOUNDRY_PROJECT_RESOURCE_ID string = aiProject.outputs.projectId
 
+// Embedding model (used by Search indexer for vector search)
+output EMBEDDING_MODEL_DEPLOYMENT string = aiServices.outputs.embeddingModelName
+
 // AI Search / Knowledge Base
 output ADVISOR_SEARCH_ENDPOINT string = search.outputs.searchEndpoint
 output SEARCH_SERVICE_NAME string = search.outputs.searchName
@@ -167,3 +208,7 @@ output PROJECT_PRINCIPAL_ID string = aiProject.outputs.projectPrincipalId
 output AI_SERVICES_NAME string = aiServices.outputs.aiServicesName
 output STORAGE_ACCOUNT_NAME string = storage.outputs.storageAccountName
 output KNOWLEDGE_CONTAINER_NAME string = storage.outputs.knowledgeContainerName
+
+// Web App
+output WEB_APP_HOSTNAME string = webApp.outputs.webAppHostname
+output WEB_APP_NAME string = webApp.outputs.webAppName

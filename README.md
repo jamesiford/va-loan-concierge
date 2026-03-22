@@ -17,10 +17,12 @@ A Veteran borrower interacts with a single chat interface. A single query like:
 …triggers a multi-agent pipeline that:
 
 1. Answers VA loan eligibility questions with **cited, knowledge-base-grounded responses**
-2. Runs a **live refinance savings calculator** using real amortization math
-3. **Books a consultation appointment** with a loan officer
-4. **Creates a calendar event** on the Veteran's M365 calendar via Work IQ
-5. Streams every step of the reasoning — agent activations, tool calls, source citations — to a real-time Agent Flow Log in the UI
+2. Collects loan details via a **human-in-the-loop prompt** (with retry loop and skip option)
+3. Runs a **live refinance savings calculator** using real amortization math
+4. **Books a consultation appointment** with a loan officer
+5. Asks for **appointment confirmation** — confirm, reschedule, or decline
+6. **Creates a calendar event** on the Veteran's M365 calendar via Work IQ
+7. Streams every step of the reasoning — agent activations, tool calls, source citations — to a real-time Agent Flow Log in the UI
 
 ---
 
@@ -120,19 +122,25 @@ This creates the following Azure resources:
 | AI Services | `ais-{env}` | Foundry + OpenAI models + connections (next-gen) |
 | AI Project | `proj-{env}` | Foundry project (agents live here) |
 | AI Search | `srch-{env}` | Knowledge base index for Advisor Agent |
+| App Service Plan | `plan-{env}` | B1 Linux plan (hosts web app; supports VNet integration) |
+| App Service | `app-{env}` | FastAPI backend + React static frontend |
 | Function App | `func-{env}` | Custom MCP server (calculator + scheduler tools) |
 | Storage Account | `st{env}` | KB document blobs + Function App runtime |
 | App Insights | `appi-{env}` | Monitoring + diagnostics |
 | Log Analytics | `log-{env}` | Required by App Insights |
 
-Plus 12 RBAC role assignments and 2 RemoteTool project connections — all automated.
+Plus 17 RBAC role assignments and 2 RemoteTool project connections — all automated.
 
 After provisioning completes, `azd up` automatically:
 1. Uploads the 3 knowledge documents to blob storage
 2. Creates an AI Search data source, index, and indexer (pulls from blob → indexes automatically)
 3. Provisions RemoteTool connections for the KB MCP and custom MCP endpoints
-4. Deploys the MCP server code to the Function App
-5. Registers all 5 Foundry agents and uploads the workflow definition
+4. Builds the React frontend and copies it to `./static/` for App Service deployment
+5. Deploys the MCP server to the Function App and the backend + UI to the App Service
+6. Pushes hook-set connection names to the App Service as App Settings
+7. Registers all 5 Foundry agents and uploads the workflow definition
+
+After `azd up` completes, the demo is live at `https://app-{env}.azurewebsites.net`.
 
 > **Updating knowledge sources:** To add or update documents, upload new files to the `knowledge-base` blob container and re-run the Search indexer. No redeployment needed.
 
@@ -154,6 +162,18 @@ azd deploy    # re-deploys to pick up the calendar connection
 
 ### Run the Demo
 
+After `azd up`, the demo is live at the App Service URL:
+
+```
+https://app-{env}.azurewebsites.net
+```
+
+Select a borrower profile (Marcus, Sarah, or James) and click a demo query button to see the full agent pipeline in action.
+
+#### Local Development (optional)
+
+For local development with hot-reload:
+
 ```bash
 # Install Python dependencies
 pip install -r requirements.txt
@@ -167,8 +187,6 @@ npm install        # first time only
 npm run dev
 # → Open http://localhost:5173
 ```
-
-The UI provides three demo query buttons for quick testing. Select a borrower profile (Marcus, Sarah, or James) and click a query to see the full agent pipeline in action.
 
 ### Tear Down
 
@@ -200,7 +218,7 @@ python main.py --query "Can I use my VA loan benefit a second time?"
 ## Running Tests
 
 ```bash
-pytest tests/     # 98 tests — all agents mocked, no Azure calls needed
+pytest tests/     # 109 tests — all agents mocked, no Azure calls needed
 ```
 
 ---
@@ -239,7 +257,8 @@ va-loan-concierge/
 │   └── calendar_agent.py        # Work IQ Calendar MCP — M365 calendar events
 │
 ├── api/
-│   └── server.py                # FastAPI — POST /api/chat SSE endpoint
+│   ├── server.py                # FastAPI — POST /api/chat SSE endpoint
+│   └── conversation_state.py    # In-memory HIL conversation state (TTL-based)
 │
 ├── mcp-server/                  # Azure Function App — custom MCP server
 │   ├── function_app.py          # HTTP trigger — MCP JSON-RPC handler
@@ -304,9 +323,24 @@ An **Azure Function App** (`mcp-server/`) implements the MCP JSON-RPC protocol o
 - Returns confirmed slot with loan officer name, calendar date, and confirmation number
 - Appointment type is context-aware: "IRRRL review and rate lock" vs. "VA Loan Consultation"
 
+### Human-in-the-Loop — Multi-Turn Conversations
+
+The orchestrator supports **multi-turn conversations** where it pauses to collect user input before proceeding. State is tracked in-memory with a 10-minute TTL.
+
+**Calculator HIL — Loan Details Collection:**
+When no borrower profile is loaded and the calculator is needed, the orchestrator pauses with a 5-field prompt (balance, current rate, new rate, remaining term, fee exemption). If the calculator can't run with the provided details, it retries up to 3 times — or the user can say "skip" to move on.
+
+**Appointment Confirmation HIL:**
+After the Scheduler books an appointment, the orchestrator pauses for confirmation. The user can:
+- **Confirm** (default) — Calendar Agent creates an M365 calendar event
+- **Reschedule** — Scheduler re-runs with the new preference, then asks again
+- **Decline** — Calendar step skipped, appointment still confirmed
+
+Both HIL patterns work in the Python orchestrator (React UI) and the Foundry Workflow Agent (Copilot Studio / Teams), using `GotoAction` loops and `ConditionGroup` branching in the declarative YAML.
+
 ### Work IQ Calendar — M365 Integration (Calendar Agent)
 
-After the Scheduler confirms an appointment, the Calendar Agent calls `CreateEvent` on the **Work IQ Calendar MCP server** to place it on the Veteran's M365 calendar.
+After the Scheduler confirms an appointment and the user confirms, the Calendar Agent calls `CreateEvent` on the **Work IQ Calendar MCP server** to place it on the Veteran's M365 calendar.
 
 ### Demo Borrower Profiles
 
@@ -332,7 +366,7 @@ Three selectable profiles inject personalized context into every agent query:
 | Auth | `azure-identity` (`DefaultAzureCredential`) |
 | MCP server | Azure Functions v2 (plain HTTP trigger) |
 | Infrastructure | Bicep + Azure Developer CLI (`azd`) |
-| Tests | `pytest` — 98 tests across all agents |
+| Tests | `pytest` — 109 tests across all agents |
 
 ### Frontend
 
@@ -358,9 +392,10 @@ Three selectable profiles inject personalized context into every agent query:
 | New Foundry agent API | All five agents registered via `create_version` + `PromptAgentDefinition` |
 | Real-time streaming | Every agent step streamed to the browser as SSE events |
 | Infrastructure-as-code | `azd up` provisions everything; `azd down` tears it all down |
+| Human-in-the-loop | Multi-turn conversations with calculator retry loops and appointment confirmation |
 | Profile-aware responses | Borrower context injected per-query; calculator uses real loan parameters |
 | Governed, citable AI | Every factual claim traces back to a specific knowledge document |
-| Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams |
+| Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams (with HIL parity) |
 
 ---
 
@@ -375,6 +410,7 @@ Three selectable profiles inject personalized context into every agent query:
 | 2 | Azure-Hosted MCP Server | Calculator + Scheduler agents calling tools via custom Azure Function App MCP endpoint |
 | 3 | Workflow Agent | Declarative YAML orchestration deployed to Foundry for Copilot Studio / Teams path |
 | 4 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 12 RBAC assignments, zero manual steps |
+| — | Human-in-the-Loop | Multi-turn calculator retry loops, appointment confirm/reschedule/decline, workflow parity |
 
 ### Planned
 

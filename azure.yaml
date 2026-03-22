@@ -24,10 +24,19 @@ services:
     language: python
     project: ./mcp-server
 
+  web-app:
+    host: appservice
+    language: python
+    project: ./
+
 hooks:
   postprovision:
     shell: sh
     run: infra/hooks/postprovision.sh
+
+  predeploy:
+    shell: sh
+    run: infra/hooks/predeploy.sh
 
   postdeploy:
     shell: sh

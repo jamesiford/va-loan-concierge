@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 
-export default function ChatInput({ onSend, disabled }) {
+export default function ChatInput({ onSend, disabled, suggestions }) {
   const [input, setInput] = useState('');
   const textareaRef = useRef(null);
 
@@ -23,6 +23,28 @@ export default function ChatInput({ onSend, disabled }) {
       className="flex-shrink-0 px-4 py-3"
       style={{ background: '#FFFFFF', borderTop: '1px solid #E5E2DC' }}
     >
+      {/* Suggestion buttons (shown during human-in-the-loop pauses) */}
+      {suggestions && suggestions.length > 0 && !disabled && (
+        <div className="flex flex-wrap gap-2 mb-2">
+          {suggestions.map((s, i) => (
+            <button
+              key={i}
+              onClick={() => { setInput(''); onSend(s); }}
+              className="text-xs px-3 py-1.5 rounded-full border-none cursor-pointer transition-colors"
+              style={{
+                background: '#F5F3FF',
+                color: '#7C3AED',
+                border: '1px solid #DDD6FE',
+                fontFamily: 'inherit',
+              }}
+              onMouseEnter={e => { e.target.style.background = '#EDE9FE'; }}
+              onMouseLeave={e => { e.target.style.background = '#F5F3FF'; }}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
       <div
         className="flex items-end gap-2.5 rounded-xl px-3 py-2.5 transition-colors"
         style={{ background: '#F9FAFB', border: '1.5px solid #E5E2DC' }}

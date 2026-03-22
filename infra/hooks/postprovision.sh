@@ -19,6 +19,9 @@ SEARCH_ENDPOINT=$(azd env get-value ADVISOR_SEARCH_ENDPOINT 2>/dev/null || echo 
 SEARCH_SERVICE_NAME=$(azd env get-value SEARCH_SERVICE_NAME 2>/dev/null || echo "")
 MCP_TOOLS_ENDPOINT=$(azd env get-value MCP_TOOLS_ENDPOINT 2>/dev/null || echo "")
 STORAGE_ACCOUNT_NAME=$(azd env get-value STORAGE_ACCOUNT_NAME 2>/dev/null || echo "")
+AI_SERVICES_NAME=$(azd env get-value AI_SERVICES_NAME 2>/dev/null || echo "")
+EMBEDDING_MODEL=$(azd env get-value EMBEDDING_MODEL_DEPLOYMENT 2>/dev/null || echo "text-embedding-3-small")
+AZURE_RESOURCE_GROUP=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null || echo "")
 KNOWLEDGE_CONTAINER=$(azd env get-value KNOWLEDGE_CONTAINER_NAME 2>/dev/null || echo "knowledge-base")
 
 if [ -z "$PROJECT_RESOURCE_ID" ]; then
@@ -78,20 +81,42 @@ curl -s -X PUT "${SEARCH_ENDPOINT}/datasources/${DATASOURCE_NAME}?api-version=20
     -d @/tmp/datasource.json \
     -o /dev/null -w "  Data source: HTTP %{http_code}\n"
 
-# ── 3. Create AI Search index ────────────────────────────────────────────────
+# ── 3. Create AI Search index (with vector field for hybrid search) ──────────
 
 echo "Creating search index: $KB_NAME"
 
-cat > /tmp/kb-index.json << 'INDEXEOF'
+cat > /tmp/kb-index.json << INDEXEOF
 {
-  "name": "kb-va-loan-guidelines",
+  "name": "${KB_NAME}",
   "fields": [
     {"name": "id", "type": "Edm.String", "key": true, "filterable": true},
     {"name": "content", "type": "Edm.String", "searchable": true, "analyzer": "standard.lucene"},
+    {"name": "content_vector", "type": "Collection(Edm.Single)", "searchable": true, "dimensions": 1536, "vectorSearchProfile": "default-profile"},
     {"name": "metadata_storage_name", "type": "Edm.String", "filterable": true, "facetable": true},
     {"name": "metadata_storage_path", "type": "Edm.String", "filterable": true}
   ],
+  "vectorSearch": {
+    "algorithms": [
+      {
+        "name": "default-algorithm",
+        "kind": "hnsw",
+        "hnswParameters": {
+          "metric": "cosine",
+          "m": 4,
+          "efConstruction": 400,
+          "efSearch": 500
+        }
+      }
+    ],
+    "profiles": [
+      {
+        "name": "default-profile",
+        "algorithm": "default-algorithm"
+      }
+    ]
+  },
   "semantic": {
+    "defaultConfiguration": "default",
     "configurations": [
       {
         "name": "default",
@@ -111,7 +136,48 @@ curl -s -X PUT "${SEARCH_ENDPOINT}/indexes/${KB_NAME}?api-version=2024-07-01" \
     -d @/tmp/kb-index.json \
     -o /dev/null -w "  Index: HTTP %{http_code}\n"
 
-# ── 4. Create AI Search indexer (blob → index) ──────────────────────────────
+# ── 4. Create AI Search skillset (embedding generation) ─────────────────────
+
+SKILLSET_NAME="${KB_NAME}-skillset"
+echo "Creating search skillset: $SKILLSET_NAME (embedding model: $EMBEDDING_MODEL)"
+
+# Build the AI Services resource ID for the skillset
+SUBSCRIPTION_ID=$(azd env get-value AZURE_SUBSCRIPTION_ID)
+
+cat > /tmp/skillset.json << SKILLEOF
+{
+  "name": "${SKILLSET_NAME}",
+  "skills": [
+    {
+      "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
+      "name": "content-embedding",
+      "description": "Generate embeddings for knowledge base content",
+      "context": "/document",
+      "modelName": "${EMBEDDING_MODEL}",
+      "resourceUri": "https://${AI_SERVICES_NAME}.openai.azure.com",
+      "deploymentId": "${EMBEDDING_MODEL}",
+      "inputs": [
+        {"name": "text", "source": "/document/content"}
+      ],
+      "outputs": [
+        {"name": "embedding", "targetName": "content_vector"}
+      ]
+    }
+  ],
+  "cognitiveServices": {
+    "@odata.type": "#Microsoft.Azure.Search.CognitiveServicesByIdentity",
+    "resourceId": "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.CognitiveServices/accounts/${AI_SERVICES_NAME}"
+  }
+}
+SKILLEOF
+
+curl -s -X PUT "${SEARCH_ENDPOINT}/skillsets/${SKILLSET_NAME}?api-version=2024-07-01" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d @/tmp/skillset.json \
+    -o /dev/null -w "  Skillset: HTTP %{http_code}\n"
+
+# ── 5. Create AI Search indexer (blob → skillset → index) ───────────────────
 
 INDEXER_NAME="${KB_NAME}-indexer"
 echo "Creating search indexer: $INDEXER_NAME"
@@ -120,6 +186,7 @@ cat > /tmp/indexer.json << IXEOF
 {
   "name": "${INDEXER_NAME}",
   "dataSourceName": "${DATASOURCE_NAME}",
+  "skillsetName": "${SKILLSET_NAME}",
   "targetIndexName": "${KB_NAME}",
   "parameters": {
     "configuration": {
@@ -130,6 +197,9 @@ cat > /tmp/indexer.json << IXEOF
   "fieldMappings": [
     {"sourceFieldName": "metadata_storage_path", "targetFieldName": "id", "mappingFunction": {"name": "base64Encode"}},
     {"sourceFieldName": "metadata_storage_name", "targetFieldName": "metadata_storage_name"}
+  ],
+  "outputFieldMappings": [
+    {"sourceFieldName": "/document/content_vector", "targetFieldName": "content_vector"}
   ]
 }
 IXEOF
@@ -147,7 +217,7 @@ curl -s -X POST "${SEARCH_ENDPOINT}/indexers/${INDEXER_NAME}/run?api-version=202
     -H "Content-Length: 0" \
     -o /dev/null -w "  Indexer run: HTTP %{http_code}\n"
 
-# ── 5. Create RemoteTool connection for KB MCP ───────────────────────────────
+# ── 6. Create RemoteTool connection for KB MCP ───────────────────────────────
 
 ADVISOR_MCP_CONNECTION="kb-va-loan-demo-mcp"
 KB_MCP_URL="${SEARCH_ENDPOINT}/knowledgebases/${KB_NAME}/mcp?api-version=2025-11-01-preview"
@@ -172,7 +242,7 @@ curl -s -X PUT "https://management.azure.com${PROJECT_RESOURCE_ID}/connections/$
     -d @/tmp/conn-kb.json \
     -o /dev/null -w "  KB MCP connection: HTTP %{http_code}\n"
 
-# ── 6. Create RemoteTool connection for custom MCP server ────────────────────
+# ── 7. Create RemoteTool connection for custom MCP server ────────────────────
 
 MCP_TOOLS_CONNECTION="va-loan-action-mcp-conn"
 echo "Creating RemoteTool connection: $MCP_TOOLS_CONNECTION"
@@ -193,7 +263,7 @@ curl -s -X PUT "https://management.azure.com${PROJECT_RESOURCE_ID}/connections/$
     -d @/tmp/conn-mcp.json \
     -o /dev/null -w "  MCP tools connection: HTTP %{http_code}\n"
 
-# ── 7. Save connection names to azd env for use by app ───────────────────────
+# ── 8. Save connection names to azd env for use by app ───────────────────────
 
 azd env set ADVISOR_KNOWLEDGE_BASE_NAME "$KB_NAME"
 azd env set ADVISOR_MCP_CONNECTION "$ADVISOR_MCP_CONNECTION"

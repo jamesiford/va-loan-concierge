@@ -7,7 +7,7 @@ import StatusDot      from './components/StatusDot';
 import BorrowerProfile from './components/BorrowerProfile';
 
 export default function App() {
-  const { messages, flowEvents, isStreaming, sendQuery, clearEvents } = useAgentStream();
+  const { messages, flowEvents, isStreaming, awaitingInput, sendQuery, clearEvents } = useAgentStream();
   const [logVisible, setLogVisible] = useState(true);
   const [profileId, setProfileId] = useState(null);
 
@@ -71,7 +71,7 @@ export default function App() {
           }}
         >
           <ChatPanel messages={messages} isStreaming={isStreaming} onSend={handleSend} />
-          <ChatInput onSend={handleSend} disabled={isStreaming} />
+          <ChatInput onSend={handleSend} disabled={isStreaming} suggestions={awaitingInput?.suggestions} />
         </div>
 
         {/* Right: Agent Flow Log */}

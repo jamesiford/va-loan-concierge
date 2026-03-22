@@ -10,9 +10,12 @@
 
 param environmentName string
 param location string
-param modelName string = 'gpt-4o'
-param modelVersion string = '2024-11-20'
+param modelName string = 'gpt-4.1'
+param modelVersion string = '2025-04-14'
 param modelCapacity int = 30
+param embeddingModelName string = 'text-embedding-3-small'
+param embeddingModelVersion string = '1'
+param embeddingCapacity int = 30
 param searchId string
 param searchEndpoint string
 
@@ -55,6 +58,27 @@ resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-
   }
 }
 
+// ── Embedding model deployment ─────────────────────────────────────────────
+
+resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
+  parent: aiServices
+  name: embeddingModelName
+  sku: {
+    name: 'Standard'
+    capacity: embeddingCapacity
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: embeddingModelName
+      version: embeddingModelVersion
+    }
+  }
+  dependsOn: [
+    modelDeployment
+  ]
+}
+
 // ── AI Search connection (account-level, shared to all projects) ────────────
 
 resource searchConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
@@ -75,3 +99,4 @@ output aiServicesId string = aiServices.id
 output aiServicesName string = aiServices.name
 output aiServicesPrincipalId string = aiServices.identity.principalId
 output aiServicesEndpoint string = 'https://${aiServices.properties.customSubDomainName}.services.ai.azure.com/'
+output embeddingModelName string = embeddingModelName

@@ -129,28 +129,43 @@ export function useAgentStream() {
   const [messages,   setMessages]   = useState(INITIAL_MESSAGES);
   const [flowEvents, setFlowEvents] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [awaitingInput, setAwaitingInput] = useState(null); // { conversationId, suggestions }
   const isRunning = useRef(false);
+  const conversationIdRef = useRef(null);
 
   const sendQuery = useCallback(async (query, profileId = null) => {
     if (!query || isRunning.current) return;
     isRunning.current = true;
-    setFlowEvents([]);
+
+    // If resuming a paused conversation, don't clear the flow log.
+    const isResume = conversationIdRef.current !== null;
+    if (!isResume) {
+      setFlowEvents([]);
+    }
+    setAwaitingInput(null);
     setMessages(prev => [...prev, { role: 'user', content: query }]);
     setIsStreaming(true);
 
     if (MOCK_MODE) {
       await _runMock(query, setFlowEvents, setMessages);
     } else {
-      await _runLive(query, profileId, setFlowEvents, setMessages);
+      await _runLive(
+        query, profileId, setFlowEvents, setMessages,
+        setAwaitingInput, conversationIdRef,
+      );
     }
 
     setIsStreaming(false);
     isRunning.current = false;
   }, []);
 
-  const clearEvents = useCallback(() => setFlowEvents([]), []);
+  const clearEvents = useCallback(() => {
+    setFlowEvents([]);
+    conversationIdRef.current = null;
+    setAwaitingInput(null);
+  }, []);
 
-  return { messages, flowEvents, isStreaming, sendQuery, clearEvents };
+  return { messages, flowEvents, isStreaming, awaitingInput, sendQuery, clearEvents };
 }
 
 // ── Mock runner ───────────────────────────────────────────────────
@@ -180,11 +195,16 @@ async function _runMock(query, setFlowEvents, setMessages) {
 }
 
 // ── Live SSE runner ───────────────────────────────────────────────
-async function _runLive(query, profileId, setFlowEvents, setMessages) {
+async function _runLive(
+  query, profileId, setFlowEvents, setMessages,
+  setAwaitingInput, conversationIdRef,
+) {
   let id = Date.now();
   try {
     const body = { query };
     if (profileId) body.profile_id = profileId;
+    if (conversationIdRef.current) body.conversation_id = conversationIdRef.current;
+
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -210,7 +230,27 @@ async function _runLive(query, profileId, setFlowEvents, setMessages) {
         if (!json) continue;
         try {
           const evt = JSON.parse(json);
-          if (evt.type === 'partial_response' || evt.type === 'final_response') {
+
+          if (evt.type === 'await_input') {
+            // Server is pausing for human input.
+            conversationIdRef.current = evt.conversation_id;
+            setAwaitingInput({
+              conversationId: evt.conversation_id,
+              suggestions: evt.suggestions || [],
+              inputType: evt.input_type,
+            });
+            // Show the prompt as an assistant message.
+            setMessages(prev => [...prev, {
+              role: 'assistant',
+              content: evt.message,
+              isPrompt: true,
+            }]);
+            setFlowEvents(prev => [...prev, { ...evt, id: id++ }]);
+          } else if (evt.type === 'complete') {
+            // Conversation finished — clear the conversation_id.
+            conversationIdRef.current = null;
+            setFlowEvents(prev => [...prev, { ...evt, id: id++ }]);
+          } else if (evt.type === 'partial_response' || evt.type === 'final_response') {
             setMessages(prev => [...prev, {
               role: 'assistant',
               content: evt.content,

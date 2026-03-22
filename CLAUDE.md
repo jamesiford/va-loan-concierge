@@ -136,6 +136,39 @@ This single query triggers all four specialized agents:
 - **Chat events**: Emits `plan` (agent chain preview), `handoff` (agent transitions), and
   per-agent `partial_response` events — each rendered as a separate labeled bubble in the UI
 
+#### Human-in-the-Loop (HIL) Flows
+
+The orchestrator supports multi-turn conversations where it pauses to collect user input.
+State is tracked in `api/conversation_state.py` (in-memory, 10-minute TTL). Each pause
+emits an `await_input` SSE event with `conversation_id` for resumption.
+
+**Calculator HIL — Loan Details Collection** (when `profile_id` is `None` and `needs_calculator`):
+1. Orchestrator pauses with a 5-field prompt (balance, current rate, new rate, term, fee exemption)
+2. User provides details → enriched into query → calculator runs
+3. If calculator tool NOT called (missing info), retry loop:
+   - Up to 3 retries with `awaiting_calculator_retry` pending action
+   - User can provide more details OR say "skip" / "use defaults" / "forget it" etc.
+   - After 3 failed retries, calculator is skipped automatically
+4. Skip keywords (8): `skip`, `move on`, `don't calculate`, `no calc`, `forget it`,
+   `never mind`, `use defaults`, `default`
+
+**Appointment Confirmation HIL** (after scheduler books an appointment):
+1. Orchestrator pauses: "Does this appointment work for you?"
+2. 3-way classification (LLM with keyword fallback):
+   - **Confirm** (default) → Calendar Agent creates M365 event
+   - **Reschedule** → Scheduler re-runs with new preference, loops back to confirmation
+   - **Decline** → Calendar step skipped, appointment still confirmed
+3. Reschedule keywords (16): `instead`, `change`, `different`, `reschedule`, `another`,
+   `monday`–`saturday`, `morning`, `afternoon`, `earlier`, `later`
+4. Decline keywords (7): `no`, `skip`, `don't`, `cancel`, `decline`, `not now`, `no thanks`
+
+**ConversationState** (`api/conversation_state.py`):
+- `pending_action`: `None` | `"awaiting_profile_info"` | `"awaiting_calculator_retry"`
+  | `"awaiting_appointment_confirmation"`
+- `user_provided_details`: `bool` — skips `_demo_context_block` when user manually provided
+  loan details (prevents profile-based context from overriding user input)
+- `calculator_retry_count`: `int` — max 3 attempts before forcing skip
+
 ---
 
 ## Frontend UI (`ui/`)
@@ -214,6 +247,9 @@ backend streams these as Server-Sent Events (SSE); the UI renders them as they a
 | `calendar_tool_result` | ✓ | Green | Calendar tool returned a result |
 | `handoff` | ⇄ | Gray | Control passed between agents (also appears in chat) |
 | `orchestrator_synthesize` | ⬡ | Navy | Orchestrator merging results |
+| `await_input` | ⏸ | Navy | Orchestrator paused — waiting for user input (HIL) |
+| `calculator_note` | ⚠ | Blue | Calculator skipped/retry notice |
+| `scheduler_note` | ⚠ | Teal | Scheduler notice |
 | `complete` | ✓ | Green | Full response ready |
 | `error` | ✗ | Red | Something went wrong |
 
@@ -246,6 +282,14 @@ The backend (`api/server.py`) streams newline-delimited JSON events to the UI:
 {"type": "partial_response", "agent": "calendar", "label": "Calendar", "content": "..."}
 {"type": "complete", "message": "Response ready"}
 ```
+
+**HIL pause event (emitted when orchestrator needs user input):**
+```json
+{"type": "await_input", "message": "To calculate your refinance savings, I need five pieces of information...", "conversation_id": "a1b2c3d4e5f6", "input_type": "profile_info", "suggestions": ["Balance $320,000, current rate 6.8%...", "Balance $400,000, current rate 7.1%..."]}
+```
+
+The `conversation_id` is passed back on the next `POST /api/chat` to resume the paused flow.
+`suggestions` are rendered as clickable buttons in the chat input area.
 
 ### UI Tech Stack
 
@@ -294,6 +338,11 @@ The backend (`api/server.py`) streams newline-delimited JSON events to the UI:
   - "Am I eligible for an IRRRL?"
   - "Can I use my VA loan a second time?"
   - "Refinance + book a call for Thursday" ← flagship demo query
+- **HIL suggestion buttons**: When the orchestrator pauses for input (`await_input` event),
+  clickable suggestion buttons appear above the chat input (e.g. pre-filled loan details,
+  appointment confirmation options). Clicking a suggestion sends it as the user's response.
+- **Multi-turn HIL**: Conversation state is preserved across turns via `conversation_id`.
+  The chat panel shows the full conversation history including HIL prompts and responses.
 
 ---
 
@@ -305,7 +354,8 @@ variables are auto-populated by azd outputs and postprovision hooks — no manua
 **Next-gen Foundry resource model:**
 ```
 Microsoft.CognitiveServices/accounts (kind: AIServices)   ← ais-{env}
-  ├── /deployments/gpt-4o                                  ← model deployment
+  ├── /deployments/gpt-4.1                                 ← LLM deployment
+  ├── /deployments/text-embedding-3-small                  ← embedding deployment (vector search)
   └── /projects/proj-{env}                                 ← Foundry project
 ```
 
@@ -357,14 +407,15 @@ va-loan-concierge/
 │   │   ├── function-app.bicep   # MCP server Function App
 │   │   ├── storage.bicep        # Storage (KB blobs + Function App runtime)
 │   │   ├── monitoring.bicep     # Log Analytics + App Insights
-│   │   └── rbac.bicep           # All role assignments (12 total)
+│   │   └── rbac.bicep           # All role assignments (17 total)
 │   └── hooks/
 │       ├── postprovision.sh     # Uploads KB docs to blob, creates Search indexer, provisions connections
 │       └── postdeploy.sh        # Writes .env from azd env, registers Foundry agents
 │
 ├── api/
 │   ├── __init__.py
-│   └── server.py                # FastAPI server — exposes /api/chat SSE endpoint
+│   ├── server.py                # FastAPI server — exposes /api/chat SSE endpoint
+│   └── conversation_state.py    # In-memory HIL state (ConversationState dataclass, TTL-based)
 │
 ├── agents/
 │   ├── __init__.py
@@ -490,7 +541,7 @@ python main.py
 python main.py --query "Can I use my VA loan benefit a second time?"
 
 # Run tests
-pytest tests/
+pytest tests/               # 109 tests
 
 # ── Frontend ──────────────────────────────────────────────────────
 # Install Node dependencies (first time only)
@@ -611,11 +662,14 @@ through `useAgentStream.js` → `POST /api/chat` (`profile_id` field on `ChatReq
 
 ## Current Status / Planned Upgrades
 
-The end-to-end demo is working. All four sub-agents (advisor, calculator, scheduler,
-calendar) run, SSE events stream to the UI in real time, and per-agent partial responses
-render correctly with real KB grounding and citations.
+The end-to-end demo is fully working with human-in-the-loop interactions. All four
+sub-agents (advisor, calculator, scheduler, calendar) run, SSE events stream to the UI
+in real time, and per-agent partial responses render correctly with real KB grounding
+and citations. Multi-turn HIL flows (calculator loan details collection, appointment
+confirmation/reschedule/decline) work in both the Python orchestrator and the Foundry
+Workflow Agent.
 
-**Completed:** Phases 0–4 (agents, MCP, Foundry IQ, workflow agent, IaC).
+**Completed:** Phases 0–4 (agents, MCP, Foundry IQ, workflow agent, IaC) + HIL orchestration.
 **Next:** Phases 5–8 bring production readiness — deployed web app, observability,
 authentication, and network isolation (numbered in recommended execution order).
 
@@ -748,8 +802,14 @@ preview).
 - [x] Register Calendar Agent node with Work IQ Calendar MCP tool (CreateEvent)
 - [x] Upload workflow via `WorkflowAgentDefinition` + `deploy_workflow.py`
 - [x] Test flagship query end-to-end in Foundry portal playground
+- [x] Add HIL patterns: calculator loan details collection (with retry loop + skip),
+  appointment confirmation (confirm/reschedule/decline with GotoAction loops)
+- [x] Parity audit: workflow YAML matches Python orchestrator logic (keywords, flow
+  structure, default-to-confirm, reschedule enrichment context)
 - Note: requires preview header `Foundry-Features: WorkflowAgents=V1Preview` (injected via
   custom `SansIOHTTPPolicy` in `deploy_workflow.py`)
+- Note: Foundry workflow `kind: Question` nodes require `prompt` (not `question.text`)
+  and `entity: StringPrebuiltEntity` for free-text input
 
 **Backlog — Copilot Studio + Teams**
 Initial attempt completed (Bot Service created, agent published, appeared in M365 Copilot)

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// RBAC role assignments
+// RBAC role assignments (17 total)
 // ---------------------------------------------------------------------------
 // All role assignments needed for the multi-agent demo to function.
 //
@@ -8,6 +8,7 @@
 //   2. Project managed identity     — agent execution, KB queries
 //   3. Search managed identity      — KB indexing (calls OpenAI embeddings)
 //   4. Current user                 — local dev, azd hooks, agent registration
+//   5. Web App managed identity     — production App Service (Phase 5)
 // ---------------------------------------------------------------------------
 
 param aiServicesPrincipalId string
@@ -18,6 +19,7 @@ param searchId string
 param storageAccountId string
 param projectId string
 param userPrincipalId string = ''
+param webAppPrincipalId string = ''
 
 // ── Well-known role definition IDs ──────────────────────────────────────────
 
@@ -176,5 +178,76 @@ resource userProjectContributor 'Microsoft.Authorization/roleAssignments@2022-04
     principalId: userPrincipalId
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.contributor)
     principalType: 'User'
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNCTION APP MANAGED IDENTITY
+// ═══════════════════════════════════════════════════════════════════════════
+// The Function App has a SystemAssigned MI (function-app.bicep) but currently
+// needs no RBAC roles — it uses anonymous auth (AuthLevel.ANONYMOUS) and
+// shared-key AzureWebJobsStorage.
+//
+// Phase 8 (network isolation) will add:
+//   - functionAppPrincipalId param
+//   - Storage Blob Data Owner (for MI-based AzureWebJobsStorage)
+//   - Storage Queue Data Contributor (Functions runtime uses queues)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WEB APP MANAGED IDENTITY (Phase 5 — App Service)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Web App → AI Services (Responses API calls for all agents)
+resource webAppOpenAIUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(webAppPrincipalId)) {
+  name: guid(aiServicesId, webAppPrincipalId, roles.cognitiveServicesOpenAIUser)
+  scope: resourceGroup()
+  properties: {
+    principalId: webAppPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.cognitiveServicesOpenAIUser)
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Web App → AI Services (Cognitive Services User — agent management / registration)
+resource webAppCognitiveUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(webAppPrincipalId)) {
+  name: guid(aiServicesId, webAppPrincipalId, roles.cognitiveServicesUser)
+  scope: resourceGroup()
+  properties: {
+    principalId: webAppPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.cognitiveServicesUser)
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Web App → AI Search (KB queries via MCP — read)
+resource webAppSearchReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(webAppPrincipalId)) {
+  name: guid(searchId, webAppPrincipalId, roles.searchIndexDataReader)
+  scope: resourceGroup()
+  properties: {
+    principalId: webAppPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.searchIndexDataReader)
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Web App → Storage (blob access for KB if needed)
+resource webAppStorageReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(webAppPrincipalId)) {
+  name: guid(storageAccountId, webAppPrincipalId, roles.storageBlobDataReader)
+  scope: resourceGroup()
+  properties: {
+    principalId: webAppPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.storageBlobDataReader)
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Web App → Resource Group Contributor (ARM PUT for RemoteTool connections during initialize())
+resource webAppContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(webAppPrincipalId)) {
+  name: guid(projectId, webAppPrincipalId, roles.contributor)
+  scope: resourceGroup()
+  properties: {
+    principalId: webAppPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.contributor)
+    principalType: 'ServicePrincipal'
   }
 }
