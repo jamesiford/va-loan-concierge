@@ -94,9 +94,15 @@ def _profile_context_block(profile_id: str | None) -> str:
     return "\n".join(lines)
 
 
-def _demo_context_block(query: str, profile_id: str | None = None) -> str:
+def _demo_context_block(
+    query: str, profile_id: str | None = None, target_agent: str = "calculator"
+) -> str:
     """
-    Build a structured tool-parameter block for the Action Agent.
+    Build a structured tool-parameter block for a specific agent.
+
+    target_agent controls which parameters are injected:
+      - "calculator" → refi savings calculator parameters
+      - "scheduler"  → appointment scheduling instructions
 
     Uses the selected borrower profile's loan data when available;
     falls back to hardcoded demo defaults otherwise.
@@ -105,33 +111,41 @@ def _demo_context_block(query: str, profile_id: str | None = None) -> str:
     p = DEMO_PROFILES.get(profile_id or "", {})
     parts: list[str] = []
 
-    current_rate = p.get("current_rate")
-    if any(kw in q for kw in ("calculat", "saving", "save", "how much", "refinanc", "irrrl")):
-        if current_rate is None:
-            # Profile has no existing loan (e.g. first-time buyer) — can't run refi calc.
-            parts.append(
-                "[Note: This borrower has no existing VA loan, so the refi_savings_calculator "
-                "cannot be used. Inform them that IRRRL refinancing requires an existing VA loan.]"
-            )
-        else:
-            balance = p.get("balance", 320000)
-            new_rate = p.get("new_rate", 6.1)
-            remaining_term = p.get("remaining_term", 27)
-            funding_fee_exempt = p.get("funding_fee_exempt", True)
-            parts.append(
-                "[Loan parameters for the refinance calculation — "
-                f"pass these exactly to the refi_savings_calculator:\n"
-                f"  current_rate={current_rate}, new_rate={new_rate}, balance={balance}, "
-                f"remaining_term={remaining_term}, funding_fee_exempt={funding_fee_exempt}]"
-            )
+    if target_agent == "calculator":
+        current_rate = p.get("current_rate")
+        if any(kw in q for kw in ("calculat", "saving", "save", "how much", "refinanc", "irrrl")):
+            if current_rate is None:
+                # Profile has no existing loan (e.g. first-time buyer) — can't run refi calc.
+                parts.append(
+                    "[Note: This borrower has no existing VA loan, so the refi_savings_calculator "
+                    "cannot be used. Inform them that IRRRL refinancing requires an existing VA loan.]"
+                )
+            else:
+                balance = p.get("balance", 320000)
+                new_rate = p.get("new_rate", 6.1)
+                remaining_term = p.get("remaining_term", 27)
+                funding_fee_exempt = p.get("funding_fee_exempt", True)
+                parts.append(
+                    "[Loan parameters for the refinance calculation — "
+                    f"pass these exactly to the refi_savings_calculator:\n"
+                    f"  current_rate={current_rate}, new_rate={new_rate}, balance={balance}, "
+                    f"remaining_term={remaining_term}, funding_fee_exempt={funding_fee_exempt}]"
+                )
 
-    if any(kw in q for kw in ("schedule", "book", "appointment", "call for",
-                               "monday", "tuesday", "wednesday", "thursday",
-                               "friday", "saturday")):
-        parts.append(
-            "[Scheduling: call the appointment_scheduler tool. "
-            "Extract preferred_day and preferred_time from what the Veteran said. "
-            "If no specific time was given, use 'morning' or 'afternoon' as appropriate.]"
-        )
+    elif target_agent == "scheduler":
+        if any(kw in q for kw in ("schedule", "book", "appointment", "call for",
+                                   "monday", "tuesday", "wednesday", "thursday",
+                                   "friday", "saturday")):
+            current_rate = p.get("current_rate")
+            if current_rate is not None:
+                appt_type = "IRRRL review and rate lock"
+            else:
+                appt_type = "VA Loan Consultation"
+            parts.append(
+                "[Scheduling: call the appointment_scheduler tool. "
+                "Extract preferred_day and preferred_time from what the Veteran said. "
+                "If no specific time was given, use 'morning' or 'afternoon' as appropriate. "
+                f"Set appointment_type to '{appt_type}'.]"
+            )
 
     return "\n\n" + "\n".join(parts) if parts else ""

@@ -13,17 +13,18 @@ in a coordinated agent workflow:
 - **MCP (Model Context Protocol)** — live tool invocation for real-time calculations and actions
 
 A Veteran borrower interacts with a single conversational interface. Behind the scenes, an
-orchestrator routes their query to one or both specialized agents and synthesizes a unified response.
+orchestrator routes their query to one or more specialized agents and synthesizes a unified response.
 
 ### The Demo Scenario
 A Veteran asks about refinancing their existing VA loan:
 > *"I'm thinking about refinancing — am I eligible for an IRRRL, and if so, can you show me
 > what I'd save and book a call with someone?"*
 
-This single query triggers both agents:
+This single query triggers all three specialized agents:
 1. The **VA Loan Advisor Agent** answers eligibility questions from the knowledge base
-2. The **Loan Action Agent** runs a savings calculator and schedules an appointment via MCP tools
-3. The **Orchestrator** combines both responses into one cohesive reply
+2. The **Loan Calculator Agent** runs the refinance savings calculator via MCP tools
+3. The **Loan Scheduler Agent** books an appointment via MCP tools + Work IQ Calendar
+4. The **Orchestrator** combines all responses into one cohesive reply
 
 ---
 
@@ -51,21 +52,21 @@ This single query triggers both agents:
 │   (main.py)         │
 └──────────┬──────────┘
            │
-     ┌─────┴──────┐
-     │            │
-     ▼            ▼
-┌─────────┐  ┌─────────────┐
-│ Advisor │  │   Action    │
-│  Agent  │  │    Agent    │
-│         │  │             │
-│ Foundry │  │  MCP Tools  │
-│   IQ    │  │             │
-└─────────┘  └─────────────┘
-    │              │
-    ▼              ▼
-Knowledge      Tool Results
-Base Docs    (Calculator +
-             Scheduler)
+     ┌─────┼──────────┐
+     │     │          │
+     ▼     ▼          ▼
+┌────────┐ ┌────────┐ ┌───────────┐
+│Advisor │ │Calcul- │ │ Scheduler │
+│ Agent  │ │ ator   │ │   Agent   │
+│        │ │ Agent  │ │           │
+│Foundry │ │MCP:    │ │MCP: Appt  │
+│  IQ    │ │Refi    │ │+ Work IQ  │
+│        │ │Calc    │ │ Calendar  │
+└────────┘ └────────┘ └───────────┘
+    │          │            │
+    ▼          ▼            ▼
+Knowledge   Savings     Appointments
+Base Docs   Calculator  + Calendar
 ```
 
 ---
@@ -84,29 +85,40 @@ Base Docs    (Calculator +
   - `knowledge/loan_process_faq.md` — Common borrower questions, homebuying process steps,
     myths and misconceptions, edge cases (deployed borrowers, second-time use, appraisal gaps)
 - **Behavior**: Always cites which knowledge source supports each answer; declines to
-  speculate on information not found in the knowledge base; defers action requests to the
-  Action Agent
+  speculate on information not found in the knowledge base; defers calculation/scheduling
+  requests to the Calculator or Scheduler agents
 
-### 2. Loan Action Agent (`agents/action_agent.py`)
-- **Capability**: MCP — live tool invocation via MCP server
-- **Purpose**: Performs real-time calculations and scheduling actions on behalf of the Veteran
-- **MCP Tools** (2 simulated tools):
+### 2. Loan Calculator Agent (`agents/calculator_agent.py`)
+- **Capability**: MCP — live tool invocation via MCP server (calculation tools only)
+- **Purpose**: Performs real-time refinance savings calculations on behalf of the Veteran
+- **MCP Tools** (1 tool, restricted):
   - `refi_savings_calculator` — Given current rate, new rate, loan balance, and remaining
     term, returns monthly savings, annual savings, and break-even timeline
-  - `appointment_scheduler` — Given a preferred day/time and loan officer name, returns a
-    confirmed appointment slot with a confirmation number
-- **Behavior**: Always surfaces tool inputs and outputs transparently; confirms actions
-  with the user before booking; returns structured results for the orchestrator to format
+- **Behavior**: Always surfaces tool inputs and outputs transparently; presents savings
+  figures clearly with break-even timeline and VA net tangible benefit test result
 
-### 3. Orchestrator (`main.py`)
+### 3. Loan Scheduler Agent (`agents/scheduler_agent.py`)
+- **Capability**: MCP — live tool invocation via two MCP servers
+- **Purpose**: Books appointments and manages calendar events on behalf of the Veteran
+- **MCP Tools** (2 sources):
+  - Custom MCP server: `appointment_scheduler` — Given a preferred day/time and loan
+    officer name, returns a confirmed appointment slot with a confirmation number
+  - Work IQ Calendar (Microsoft-hosted): Full calendar management — create events, check
+    availability, find meeting times, accept/decline invitations
+- **Behavior**: Confirms appointment details clearly including confirmation number, date,
+  time, and assigned loan officer; can check real calendar availability via Work IQ
+
+### 4. Orchestrator (`main.py`)
 - **Purpose**: Entry point and coordinator; receives the user query, determines which
   agent(s) to invoke, collects results, and synthesizes a single unified response
-- **Routing Logic**:
+- **Routing Logic** (3-way classification: `needs_advisor`, `needs_calculator`, `needs_scheduler`):
   - Knowledge/eligibility questions → Advisor Agent only
-  - Calculator/scheduling requests → Action Agent only
-  - Mixed queries (like the demo scenario) → both agents in sequence, results merged
-- **Response Format**: Presents advisor answer first (context/eligibility), then action
-  results (savings figures, appointment confirmation), in a single readable reply
+  - Savings calculation requests → Calculator Agent only
+  - Scheduling/booking requests → Scheduler Agent only
+  - Mixed queries (like the demo scenario) → multiple agents in sequence, results merged
+- **Response Format**: Presents advisor answer first (context/eligibility), then calculator
+  results (savings figures), then scheduler results (appointment confirmation), in a single
+  readable reply
 
 ---
 
@@ -143,8 +155,12 @@ split into two panels side-by-side on desktop (stacked on mobile):
 │                              │  │   ✓ IRRRL eligible       │   │
 │                              │  └──────────────────────────┘   │
 │                              │  ┌──────────────────────────┐   │
-│                              │  │ ⚙️  Action Agent          │   │
+│                              │  │ 🧮 Calculator Agent       │   │
 │                              │  │   Tool: refi_calculator  │   │
+│                              │  │   ✓ Savings: $142/mo     │   │
+│                              │  └──────────────────────────┘   │
+│                              │  ┌──────────────────────────┐   │
+│                              │  │ 📅 Scheduler Agent       │   │
 │                              │  │   Tool: appt_scheduler   │   │
 │                              │  │   ✓ Confirmed: THU 2pm   │   │
 │                              │  └──────────────────────────┘   │
@@ -170,9 +186,12 @@ backend streams these as Server-Sent Events (SSE); the UI renders them as they a
 | `advisor_start` | 📚 | Amber | Advisor Agent activated |
 | `advisor_source` | 🔍 | Amber | Querying a specific knowledge source |
 | `advisor_result` | ✓ | Green | Advisor returned a result |
-| `action_start` | ⚙️ | Blue | Action Agent activated |
-| `action_tool_call` | 🔧 | Blue | MCP tool being invoked (shows tool name + inputs) |
-| `action_tool_result` | ✓ | Green | MCP tool returned a result (shows key outputs) |
+| `calculator_start` | 🧮 | Blue | Calculator Agent activated |
+| `calculator_tool_call` | 🔧 | Blue | Calculator MCP tool being invoked (shows tool name + inputs) |
+| `calculator_tool_result` | ✓ | Green | Calculator tool returned a result (shows key outputs) |
+| `scheduler_start` | 📅 | Cyan | Scheduler Agent activated |
+| `scheduler_tool_call` | 🔧 | Cyan | Scheduler MCP tool being invoked (shows tool name + inputs) |
+| `scheduler_tool_result` | ✓ | Green | Scheduler tool returned a result (shows key outputs) |
 | `handoff` | ⇄ | Purple | Control passed between agents |
 | `orchestrator_synthesize` | ⬡ | Indigo | Orchestrator merging results |
 | `complete` | ✓ | Green | Full response ready |
@@ -183,18 +202,20 @@ The backend (`api/server.py`) streams newline-delimited JSON events to the UI:
 
 ```json
 {"type": "orchestrator_start", "message": "Analyzing your query..."}
-{"type": "orchestrator_route", "message": "Routing to: Advisor Agent + Action Agent"}
+{"type": "orchestrator_route", "message": "Routing to: Advisor Agent + Calculator Agent + Scheduler Agent"}
 {"type": "advisor_start", "message": "VA Loan Advisor activated"}
 {"type": "advisor_source", "message": "Querying: va_guidelines.md"}
 {"type": "advisor_source", "message": "Querying: lender_products.md"}
 {"type": "advisor_result", "message": "IRRRL eligibility confirmed (2 sources cited)"}
-{"type": "handoff", "message": "Advisor → Action Agent"}
-{"type": "action_start", "message": "Loan Action Agent activated"}
-{"type": "action_tool_call", "message": "refi_savings_calculator", "inputs": {"current_rate": 6.8, "new_rate": 6.1, "balance": 320000, "remaining_term": 27}}
-{"type": "action_tool_result", "message": "Monthly savings: $142 | Break-even: 19 months"}
-{"type": "action_tool_call", "message": "appointment_scheduler", "inputs": {"day": "Thursday", "time": "2:00 PM"}}
-{"type": "action_tool_result", "message": "Confirmed: Thu Mar 26 @ 2:00 PM | Ref #LOAN-84921"}
-{"type": "orchestrator_synthesize", "message": "Merging advisor + action results..."}
+{"type": "handoff", "message": "Advisor → Calculator Agent"}
+{"type": "calculator_start", "message": "Loan Calculator Agent activated"}
+{"type": "calculator_tool_call", "message": "refi_savings_calculator", "inputs": {"current_rate": 6.8, "new_rate": 6.1, "balance": 320000, "remaining_term": 27}}
+{"type": "calculator_tool_result", "message": "Monthly savings: $142 | Break-even: 19 months"}
+{"type": "handoff", "message": "Calculator → Scheduler Agent"}
+{"type": "scheduler_start", "message": "Loan Scheduler Agent activated"}
+{"type": "scheduler_tool_call", "message": "appointment_scheduler", "inputs": {"day": "Thursday", "time": "2:00 PM"}}
+{"type": "scheduler_tool_result", "message": "Confirmed: Thu Mar 26 @ 2:00 PM | Ref #LOAN-84921"}
+{"type": "orchestrator_synthesize", "message": "Merging advisor + calculator + scheduler results..."}
 {"type": "complete", "message": "Response ready"}
 {"type": "final_response", "content": "...the full synthesized answer text..."}
 ```
@@ -219,7 +240,8 @@ The backend (`api/server.py`) streams newline-delimited JSON events to the UI:
 --color-panel:       #FFFFFF;   /* Chat/log panel background */
 --color-border:      #E5E2DC;   /* Subtle warm border */
 --color-advisor:     #B45309;   /* Amber — Advisor Agent events */
---color-action:      #1D4ED8;   /* Blue — Action Agent events */
+--color-calculator:  #1D4ED8;   /* Blue — Calculator Agent events */
+--color-scheduler:   #0E7490;   /* Cyan — Scheduler Agent events */
 --color-orchestrator:#4F46E5;   /* Indigo — Orchestrator events */
 --color-success:     #15803D;   /* Green — completed events */
 ```
@@ -249,11 +271,17 @@ The backend (`api/server.py`) streams newline-delimited JSON events to the UI:
 
 | Resource | Environment Variable | Notes |
 |---|---|---|
-| Foundry Project Endpoint | `PROJECT_ENDPOINT` | From Foundry portal → Overview → Endpoints |
-| Model Deployment Name | `MODEL_DEPLOYMENT_NAME` | e.g. `gpt-4o` or `gpt-4.1` |
+| Foundry Project Endpoint | `FOUNDRY_PROJECT_ENDPOINT` | From Foundry portal → Overview → Endpoints |
+| Model Deployment | `FOUNDRY_MODEL_DEPLOYMENT` | e.g. `gpt-4o` or `gpt-4.1` |
 | Azure Subscription ID | `AZURE_SUBSCRIPTION_ID` | Used for DefaultAzureCredential scope |
-| Foundry MCP Endpoint | `MCP_ENDPOINT` | `https://mcp.ai.azure.com` (cloud-hosted MCP) |
-| Knowledge Base Index | `KNOWLEDGE_BASE_NAME` | Foundry IQ index name for advisor agent |
+| Foundry Project Resource ID | `FOUNDRY_PROJECT_RESOURCE_ID` | ARM resource ID of the Foundry project |
+| Advisor KB Name | `ADVISOR_KNOWLEDGE_BASE_NAME` | Foundry IQ index name for advisor agent |
+| Advisor Search Endpoint | `ADVISOR_SEARCH_ENDPOINT` | Azure AI Search service URL |
+| Advisor MCP Connection | `ADVISOR_MCP_CONNECTION` | RemoteTool connection name for KB MCP |
+| MCP Tools Endpoint | `MCP_TOOLS_ENDPOINT` | Custom Function App MCP URL |
+| MCP Tools Connection | `MCP_TOOLS_CONNECTION` | RemoteTool connection for custom MCP tools |
+| Scheduler Calendar Endpoint | `SCHEDULER_CALENDAR_ENDPOINT` | Work IQ Calendar MCP server URL |
+| Scheduler Calendar Connection | `SCHEDULER_CALENDAR_CONNECTION` | Foundry connection for Work IQ Calendar |
 
 Authentication: `DefaultAzureCredential` for local dev (requires `az login` before running).
 Never use API keys in code — always use credential objects.
@@ -274,7 +302,7 @@ va-loan-concierge/
 │
 ├── main.py                      # CLI entry point — imports Orchestrator + profiles
 ├── profiles.py                  # DEMO_PROFILES + _profile_context_block + _demo_context_block
-├── workflow.yaml                # Foundry Workflow Agent definition (orchestrator → advisor/action)
+├── workflow.yaml                # Foundry Workflow Agent definition (orchestrator → advisor/calculator/scheduler)
 ├── deploy_workflow.py           # Registers sub-agents + uploads workflow to Foundry
 │
 ├── api/
@@ -285,7 +313,8 @@ va-loan-concierge/
 │   ├── __init__.py
 │   ├── orchestrator_agent.py    # Orchestrator — LLM routing + sub-agent coordination
 │   ├── advisor_agent.py         # Foundry IQ / knowledge base agent
-│   └── action_agent.py          # MCP tools agent
+│   ├── calculator_agent.py       # MCP calculator agent (refi savings only)
+│   └── scheduler_agent.py       # MCP scheduler agent (appointments + Work IQ Calendar)
 │
 ├── tools/
 │   ├── __init__.py
@@ -326,7 +355,8 @@ va-loan-concierge/
 └── tests/
     ├── conftest.py
     ├── test_advisor_agent.py
-    ├── test_action_agent.py
+    ├── test_calculator_agent.py
+    ├── test_scheduler_agent.py
     └── test_orchestrator.py
 ```
 
@@ -342,7 +372,7 @@ va-loan-concierge/
 | API Server | `FastAPI` + `uvicorn` — serves SSE stream to UI |
 | Foundry SDK | `azure-ai-projects >= 2.0.1` (new-agent API — NOT classic) |
 | Authentication | `azure-identity` (`DefaultAzureCredential`) |
-| MCP | `azure-ai-projects` MCPTool + custom Azure Function App (`mcp-server/`) |
+| MCP | `azure-ai-projects` MCPTool + custom Azure Function App (`mcp-server/`) + Work IQ Calendar |
 | Env management | `python-dotenv` |
 | Testing | `pytest` |
 
@@ -432,9 +462,9 @@ The default `python main.py` run executes the flagship demo query:
 1. Orchestrator identifies this as a mixed query (knowledge + action)
 2. Advisor Agent answers IRRRL eligibility from `va_guidelines.md` and `lender_products.md`,
    with source citations
-3. Action Agent calls `refi_savings_calculator` with demo loan parameters, then calls
-   `appointment_scheduler` for Thursday
-4. Orchestrator prints a unified response showing:
+3. Calculator Agent calls `refi_savings_calculator` with demo loan parameters
+4. Scheduler Agent calls `appointment_scheduler` for Thursday
+5. Orchestrator prints a unified response showing:
    - Eligibility answer with cited sources
    - Monthly/annual savings figures with break-even timeline
    - Appointment confirmation with confirmation number
@@ -447,7 +477,7 @@ The default `python main.py` run executes the flagship demo query:
 |---|---|
 | **Foundry IQ / grounded RAG** | Advisor Agent answering from 3 knowledge sources with citations |
 | **Multi-source knowledge base** | VA guidelines + lender products + borrower FAQ all queried simultaneously |
-| **MCP tool invocation** | Action Agent calling calculator and scheduler as structured MCP tools |
+| **MCP tool invocation** | Calculator and Scheduler agents calling tools via separate MCP connections |
 | **Multi-agent orchestration** | Single user query routed to two agents, responses synthesized |
 | **Governed, citable AI** | Every factual claim traces back to a specific knowledge document |
 | **Actionable AI** | Demo ends with a real output (savings numbers + booked appointment) |
@@ -464,7 +494,8 @@ through `useAgentStream.js` → `POST /api/chat` (`profile_id` field on `ChatReq
 - `_profile_context_block(profile_id)` — prepends borrower service history and loan details
   to every agent query. When `profile_id` is `None`, prepends a note telling agents to ask
   for personal details conversationally.
-- `_demo_context_block(query, profile_id)` — appends tool parameters for the Action Agent:
+- `_demo_context_block(query, profile_id, target_agent)` — appends tool parameters for a
+  specific agent (`"calculator"` or `"scheduler"`):
   - **Refi calc params** (balance, current_rate, new_rate, etc.) → ALWAYS inject from
     profile — the user never types these out and the agent cannot know them otherwise.
   - **Appointment day/time** → NEVER inject. The agent extracts these from the user's
@@ -531,8 +562,8 @@ auth. The agent is registered with `MCPTool` (not `FileSearchTool` or `AzureAISe
 
 **How it works:**
 - `initialize()` PUTs a `RemoteTool` project connection via ARM pointing at
-  `{AZURE_AI_SEARCH_ENDPOINT}/knowledgebases/{KNOWLEDGE_BASE_NAME}/mcp?api-version=2025-11-01-preview`
-- The agent is registered with `MCPTool(server_label="knowledge-base", allowed_tools=["knowledge_base_retrieve"], project_connection_id=MCP_CONNECTION_NAME)`
+  `{ADVISOR_SEARCH_ENDPOINT}/knowledgebases/{ADVISOR_KNOWLEDGE_BASE_NAME}/mcp?api-version=2025-11-01-preview`
+- The agent is registered with `MCPTool(server_label="knowledge-base", allowed_tools=["knowledge_base_retrieve"], project_connection_id=ADVISOR_MCP_CONNECTION)`
 - After the Responses API call, `response.output` contains `url_citation` annotations on
   the message item; `_extract_citations()` extracts filenames from blob URLs and emits them
   as `advisor_source` SSE events
@@ -540,10 +571,10 @@ auth. The agent is registered with `MCPTool` (not `FileSearchTool` or `AzureAISe
   `【idx†va_guidelines.md】` etc. using annotation positions
 
 **Required env vars:**
-- `KNOWLEDGE_BASE_NAME` — KB name in Azure AI Search (e.g. `kb-va-loan-guidelines`)
-- `AZURE_AI_SEARCH_ENDPOINT` — search service URL (e.g. `https://search-va-loan-demo.search.windows.net`)
-- `PROJECT_RESOURCE_ID` — ARM resource ID of the Foundry project
-- `MCP_CONNECTION_NAME` — name for the RemoteTool connection (e.g. `kb-va-loan-demo-mcp`)
+- `ADVISOR_KNOWLEDGE_BASE_NAME` — KB name in Azure AI Search (e.g. `kb-va-loan-guidelines`)
+- `ADVISOR_SEARCH_ENDPOINT` — search service URL (e.g. `https://search-va-loan-demo.search.windows.net`)
+- `FOUNDRY_PROJECT_RESOURCE_ID` — ARM resource ID of the Foundry project
+- `ADVISOR_MCP_CONNECTION` — name for the RemoteTool connection (e.g. `kb-va-loan-demo-mcp`)
 
 **Required Azure RBAC (on the Azure AI Search service):**
 - `Search Index Data Reader` → Foundry project's managed identity
@@ -557,17 +588,22 @@ auth. The agent is registered with `MCPTool` (not `FileSearchTool` or `AzureAISe
 ### 2. Azure-Hosted MCP Server (replacing FunctionTool) — ✅ COMPLETE
 
 **Implemented state:**
-`ActionAgent` connects to an Azure Function App (`mcp-server/`) that exposes the two tools
-as an MCP-compliant HTTP endpoint. The Function App implements the MCP JSON-RPC protocol
-directly (no `mcp` Python package required — pure `azure-functions` HTTP trigger). Tool
-execution happens server-side; `ActionAgent` makes a single Responses API call and parses
-`mcp_call` items from `response.output` to emit `action_tool_call` / `action_tool_result`
-SSE events.
+`CalculatorAgent` and `SchedulerAgent` connect to the Azure Function App (`mcp-server/`)
+that exposes tools as an MCP-compliant HTTP endpoint. The Function App implements the MCP
+JSON-RPC protocol directly (no `mcp` Python package required — pure `azure-functions` HTTP
+trigger). Tool execution happens server-side; each agent makes a single Responses API call
+and parses `mcp_call` items from `response.output` to emit typed SSE events.
+
+The `SchedulerAgent` additionally connects to **Work IQ Calendar** (Microsoft-hosted MCP)
+for real calendar management (create events, check availability, find meeting times).
 
 **How it works:**
-- `initialize()` PUTs a `RemoteTool` project connection (`MCP_ACTION_CONNECTION_NAME`) via
+- `initialize()` PUTs a `RemoteTool` project connection (`MCP_TOOLS_CONNECTION`) via
   ARM with `authType: "None"` (anonymous Function App), then creates a new agent version
   with `MCPTool(server_url, project_connection_id, allowed_tools, require_approval="never")`
+- `CalculatorAgent` is restricted to `allowed_tools=["refi_savings_calculator"]`
+- `SchedulerAgent` has two MCPTool instances: custom MCP (`allowed_tools=["appointment_scheduler"]`)
+  and Work IQ Calendar (`SCHEDULER_CALENDAR_CONNECTION`, all tools allowed)
 - `mcp-server/function_app.py` handles POST `/mcp` and responds to `initialize`,
   `tools/list`, `tools/call`, and `ping` JSON-RPC methods
 - `mcp-server/server.py` contains the tool implementations and MCP `inputSchema` definitions
@@ -577,8 +613,10 @@ SSE events.
   increments in the Foundry portal on every restart, no manual deletion needed on config changes
 
 **Required env vars:**
-- `MCP_ENDPOINT` — Function App MCP URL (e.g. `https://<app>.azurewebsites.net/mcp`)
-- `MCP_ACTION_CONNECTION_NAME` — name for the RemoteTool connection (e.g. `va-loan-action-mcp-conn`)
+- `MCP_TOOLS_ENDPOINT` — Function App MCP URL (e.g. `https://<app>.azurewebsites.net/mcp`)
+- `MCP_TOOLS_CONNECTION` — name for the RemoteTool connection (e.g. `va-loan-action-mcp-conn`)
+- `SCHEDULER_CALENDAR_ENDPOINT` — Work IQ Calendar MCP server URL (Microsoft-hosted)
+- `SCHEDULER_CALENDAR_CONNECTION` — Foundry project connection name (e.g. `WorkIQCalendar`)
 
 **MCP server deployment:**
 ```bash
@@ -634,15 +672,28 @@ preview).
 **Phase 1 — Workflow Agent** ✅ COMPLETE
 - [x] Define workflow YAML with routing logic (conditional branching)
 - [x] Register Advisor Agent node with KB MCP tool
-- [x] Register Action Agent node with MCP tools
+- [x] Register Calculator Agent node with refi calculator MCP tool
+- [x] Register Scheduler Agent node with appointment scheduler + Work IQ Calendar MCP tools
 - [x] Upload workflow via `WorkflowAgentDefinition` + `deploy_workflow.py`
 - [x] Test flagship query end-to-end in Foundry portal playground
 - Note: requires preview header `Foundry-Features: WorkflowAgents=V1Preview` (injected via
   custom `SansIOHTTPPolicy` in `deploy_workflow.py`)
 
-**Phase 2 — Copilot Studio + Teams**
-- [ ] Publish workflow agent as agent application in Foundry portal
-- [ ] Connect Copilot Studio → Foundry workflow agent (native connector)
-- [ ] Test in Teams
+**Backlog — Copilot Studio + Teams**
+Initial attempt completed (Bot Service created, agent published, appeared in M365 Copilot)
+but responses failed in Teams/Copilot channels despite working in Foundry playground.
+Azure resources cleaned up (Bot Service + Entra app registration deleted, agent unpublished).
+
+**When revisited, two approaches to evaluate:**
+1. **Direct publish (retry)** — Same Foundry portal publish flow, but focus on Bot Service
+   resource configuration (auth type, messaging endpoint, channel setup) as the likely root
+   cause. The workflow itself is correct (works in playground).
+2. **Copilot Studio connector** — Use Copilot Studio's native Foundry agent connector to
+   create a CS agent that wraps the workflow, then surface that agent in M365 Copilot
+   Chat / Teams. This adds a layer but leverages CS's proven Teams integration.
+
+Items deferred:
+- [ ] Fix Bot Service configuration OR set up Copilot Studio connector
 - [ ] Design Adaptive Cards: refi savings card + appointment confirmation card
+- [ ] Verify multi-turn conversation works in Teams
 - [ ] Publish to Microsoft Teams + M365 Copilot (Work) channels

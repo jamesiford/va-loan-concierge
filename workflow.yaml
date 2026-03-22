@@ -10,7 +10,7 @@ trigger:
       value: =UserMessage(System.LastMessageText)
 
     # ── Step 1: Orchestrator classifies the query ─────────────────────
-    # Returns {"needs_advisor": bool, "needs_action": bool}
+    # Returns {"needs_advisor": bool, "needs_calculator": bool, "needs_scheduler": bool}
     - kind: InvokeAzureAgent
       id: classify
       agent:
@@ -26,12 +26,12 @@ trigger:
     - kind: ConditionGroup
       id: route
       conditions:
-        # ── Both agents needed ──────────────────────────────────────
-        - id: both
-          condition: =And(Local.Route.needs_advisor, Local.Route.needs_action)
+        # ── All three agents needed ───────────────────────────────
+        - id: all_three
+          condition: =And(Local.Route.needs_advisor, Local.Route.needs_calculator, Local.Route.needs_scheduler)
           actions:
             - kind: InvokeAzureAgent
-              id: advisor_both
+              id: advisor_all
               agent:
                 name: va-loan-advisor-iq
               conversationId: =System.ConversationId
@@ -41,9 +41,29 @@ trigger:
                 messages: Local.LatestMessage
                 autoSend: false
             - kind: InvokeAzureAgent
-              id: action_both
+              id: calculator_all
               agent:
-                name: va-loan-action-mcp
+                name: va-loan-calculator-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: false
+            - kind: InvokeAzureAgent
+              id: scheduler_all
+              agent:
+                name: va-loan-scheduler-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: false
+            - kind: InvokeAzureAgent
+              id: calendar_all
+              agent:
+                name: va-loan-calendar-mcp
               conversationId: =System.ConversationId
               input:
                 messages: =Local.LatestMessage
@@ -51,7 +71,102 @@ trigger:
                 messages: Local.LatestMessage
                 autoSend: true
 
-        # ── Advisor only ────────────────────────────────────────────
+        # ── Advisor + Calculator ──────────────────────────────────
+        - id: advisor_calculator
+          condition: =And(Local.Route.needs_advisor, Local.Route.needs_calculator)
+          actions:
+            - kind: InvokeAzureAgent
+              id: advisor_ac
+              agent:
+                name: va-loan-advisor-iq
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: false
+            - kind: InvokeAzureAgent
+              id: calculator_ac
+              agent:
+                name: va-loan-calculator-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: true
+
+        # ── Advisor + Scheduler ───────────────────────────────────
+        - id: advisor_scheduler
+          condition: =And(Local.Route.needs_advisor, Local.Route.needs_scheduler)
+          actions:
+            - kind: InvokeAzureAgent
+              id: advisor_as
+              agent:
+                name: va-loan-advisor-iq
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: false
+            - kind: InvokeAzureAgent
+              id: scheduler_as
+              agent:
+                name: va-loan-scheduler-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: false
+            - kind: InvokeAzureAgent
+              id: calendar_as
+              agent:
+                name: va-loan-calendar-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: true
+
+        # ── Calculator + Scheduler ────────────────────────────────
+        - id: calculator_scheduler
+          condition: =And(Local.Route.needs_calculator, Local.Route.needs_scheduler)
+          actions:
+            - kind: InvokeAzureAgent
+              id: calculator_cs
+              agent:
+                name: va-loan-calculator-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: false
+            - kind: InvokeAzureAgent
+              id: scheduler_cs
+              agent:
+                name: va-loan-scheduler-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: false
+            - kind: InvokeAzureAgent
+              id: calendar_cs
+              agent:
+                name: va-loan-calendar-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: true
+
+        # ── Advisor only ──────────────────────────────────────────
         - id: advisor_only
           condition: =Local.Route.needs_advisor
           actions:
@@ -66,14 +181,39 @@ trigger:
                 messages: Local.LatestMessage
                 autoSend: true
 
-        # ── Action only ─────────────────────────────────────────────
-        - id: action_only
-          condition: =Local.Route.needs_action
+        # ── Calculator only ───────────────────────────────────────
+        - id: calculator_only
+          condition: =Local.Route.needs_calculator
           actions:
             - kind: InvokeAzureAgent
-              id: action_solo
+              id: calculator_solo
               agent:
-                name: va-loan-action-mcp
+                name: va-loan-calculator-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: true
+
+        # ── Scheduler only ────────────────────────────────────────
+        - id: scheduler_only
+          condition: =Local.Route.needs_scheduler
+          actions:
+            - kind: InvokeAzureAgent
+              id: scheduler_solo
+              agent:
+                name: va-loan-scheduler-mcp
+              conversationId: =System.ConversationId
+              input:
+                messages: =Local.LatestMessage
+              output:
+                messages: Local.LatestMessage
+                autoSend: false
+            - kind: InvokeAzureAgent
+              id: calendar_solo
+              agent:
+                name: va-loan-calendar-mcp
               conversationId: =System.ConversationId
               input:
                 messages: =Local.LatestMessage
@@ -90,4 +230,4 @@ trigger:
       id: end
 id: ""
 name: va-loan-concierge-workflow
-description: VA Loan Concierge — routes Veteran queries to advisor and/or action agents based on LLM classification.
+description: VA Loan Concierge — routes Veteran queries to advisor, calculator, scheduler, and/or calendar agents based on LLM classification.

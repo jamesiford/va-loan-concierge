@@ -16,12 +16,12 @@ Agent registration:
   subsequent starts.
 
 Required environment variables:
-  PROJECT_ENDPOINT         — Foundry project data-plane endpoint
-  MODEL_DEPLOYMENT_NAME    — e.g. gpt-4.1
-  KNOWLEDGE_BASE_NAME      — KB index name in Azure AI Search
-  AZURE_AI_SEARCH_ENDPOINT — e.g. https://my-search.search.windows.net
-  PROJECT_RESOURCE_ID      — ARM resource ID of the Foundry project
-  MCP_CONNECTION_NAME      — Name for the RemoteTool connection to create/reuse
+  FOUNDRY_PROJECT_ENDPOINT    — Foundry project data-plane endpoint
+  FOUNDRY_MODEL_DEPLOYMENT    — e.g. gpt-4.1
+  ADVISOR_KNOWLEDGE_BASE_NAME — KB index name in Azure AI Search
+  ADVISOR_SEARCH_ENDPOINT     — e.g. https://my-search.search.windows.net
+  FOUNDRY_PROJECT_RESOURCE_ID — ARM resource ID of the Foundry project
+  ADVISOR_MCP_CONNECTION       — Name for the RemoteTool connection to create/reuse
 """
 
 import asyncio
@@ -97,15 +97,15 @@ class AdvisorAgent:
     def _get_project_client(self) -> AIProjectClient:
         if self._project_client is None:
             self._project_client = AIProjectClient(
-                endpoint=os.environ["PROJECT_ENDPOINT"],
+                endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
                 credential=DefaultAzureCredential(),
             )
         return self._project_client
 
     def _kb_mcp_endpoint(self) -> str:
         """Return the Azure AI Search KB MCP endpoint URL."""
-        base = os.environ["AZURE_AI_SEARCH_ENDPOINT"].rstrip("/")
-        kb = os.environ["KNOWLEDGE_BASE_NAME"]
+        base = os.environ["ADVISOR_SEARCH_ENDPOINT"].rstrip("/")
+        kb = os.environ["ADVISOR_KNOWLEDGE_BASE_NAME"]
         return f"{base}/knowledgebases/{kb}/mcp?api-version=2025-11-01-preview"
 
     # ------------------------------------------------------------------
@@ -120,8 +120,8 @@ class AdvisorAgent:
         endpoint without embedding credentials.  Idempotent — safe to call
         on every startup.
         """
-        project_resource_id = os.environ["PROJECT_RESOURCE_ID"]
-        connection_name = os.environ["MCP_CONNECTION_NAME"]
+        project_resource_id = os.environ["FOUNDRY_PROJECT_RESOURCE_ID"]
+        connection_name = os.environ["ADVISOR_MCP_CONNECTION"]
         mcp_ep = self._kb_mcp_endpoint()
 
         cred = SyncCredential()
@@ -189,9 +189,9 @@ class AdvisorAgent:
         await asyncio.to_thread(self._create_or_update_connection)
 
         project_client = self._get_project_client()
-        model = os.environ["MODEL_DEPLOYMENT_NAME"]
+        model = os.environ["FOUNDRY_MODEL_DEPLOYMENT"]
 
-        connection_name = os.environ["MCP_CONNECTION_NAME"]
+        connection_name = os.environ["ADVISOR_MCP_CONNECTION"]
         mcp_tool = MCPTool(
             server_label="knowledge-base",
             server_url=self._kb_mcp_endpoint(),
@@ -364,7 +364,7 @@ class AdvisorAgent:
         yield {"type": "advisor_start", "message": "VA Loan Advisor activated"}
         yield {
             "type": "advisor_source",
-            "message": f"Searching: {os.environ.get('KNOWLEDGE_BASE_NAME', 'knowledge base')}",
+            "message": f"Searching: {os.environ.get('ADVISOR_KNOWLEDGE_BASE_NAME', 'knowledge base')}",
             "source_id": "knowledge_base",
         }
 
@@ -373,7 +373,7 @@ class AdvisorAgent:
 
         project_client = self._get_project_client()
         openai_client = project_client.get_openai_client()
-        model = os.environ["MODEL_DEPLOYMENT_NAME"]
+        model = os.environ["FOUNDRY_MODEL_DEPLOYMENT"]
 
         try:
             response = await openai_client.responses.create(

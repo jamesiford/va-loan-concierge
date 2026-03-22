@@ -14,39 +14,43 @@ export function buildStream(query) {
   ];
 
   if (isRefi && isSchedule) {
-    events.push({ type: 'orchestrator_route', message: 'Routing to: VA Loan Advisor Agent + Loan Action Agent' });
+    events.push({ type: 'orchestrator_route', message: 'Routing to: Advisor Agent + Calculator Agent + Scheduler Agent' });
+    events.push({ type: 'plan', message: 'VA Loan Advisor → Loan Calculator → Loan Scheduler → Calendar' });
     events.push({ type: 'advisor_start', message: 'VA Loan Advisor Agent activated' });
     events.push({ type: 'advisor_source', message: 'va_guidelines.md', detail: 'Querying IRRRL eligibility rules' });
     events.push({ type: 'advisor_source', message: 'lender_products.md', detail: 'Querying lender IRRRL product terms' });
     events.push({ type: 'advisor_result', message: 'IRRRL eligibility confirmed', detail: '2 sources cited • Must have existing VA loan • Rate reduction required • No recoup period violation' });
-    events.push({ type: 'handoff', message: 'VA Loan Advisor → Loan Action Agent' });
-    events.push({ type: 'action_start', message: 'Loan Action Agent activated' });
-    events.push({ type: 'action_tool_call', message: 'refi_savings_calculator', inputs: { current_rate: '6.8%', new_rate: '6.1%', balance: '$320,000', remaining_term: '27 years' } });
-    events.push({ type: 'action_tool_result', message: 'Monthly savings: $142 • Annual: $1,704 • Break-even: 19 months' });
-    events.push({ type: 'action_tool_call', message: 'appointment_scheduler', inputs: { day: 'Thursday', time: '2:00 PM', officer: 'Next available' } });
-    events.push({ type: 'action_tool_result', message: 'Confirmed: Thu Mar 26 @ 2:00 PM • Ref #LOAN-84921' });
-    events.push({ type: 'orchestrator_synthesize', message: 'Merging advisor answer + action results...' });
-    events.push({ type: 'complete', message: 'Response ready' });
-    events.push({
-      type: 'final_response',
-      content: `**Yes, you appear eligible for an IRRRL (Interest Rate Reduction Refinance Loan).**
+    events.push({ type: 'partial_response', agent: 'advisor', label: 'VA Loan Advisor', content: `**Yes, you appear eligible for an IRRRL (Interest Rate Reduction Refinance Loan).**
 
 Based on VA guidelines and our lender product terms, you qualify if you currently hold an active VA loan and the new rate is lower than your existing rate — both conditions are met here.
 
-**Your estimated savings:**
+*Sources: VA Lender's Handbook (Ch. 6 — IRRRL), Lender IRRRL product guidelines*` });
+    events.push({ type: 'handoff', message: 'Advisor → Calculator Agent' });
+    events.push({ type: 'calculator_start', message: 'Loan Calculator Agent activated' });
+    events.push({ type: 'calculator_tool_call', message: 'refi_savings_calculator', inputs: { current_rate: '6.8%', new_rate: '6.1%', balance: '$320,000', remaining_term: '27 years' } });
+    events.push({ type: 'calculator_tool_result', message: 'Monthly savings: $142 • Annual: $1,704 • Break-even: 19 months' });
+    events.push({ type: 'partial_response', agent: 'calculator', label: 'Loan Calculator', content: `**Your estimated savings:**
 - Monthly savings: **$142**
 - Annual savings: **$1,704**
-- Break-even point: **19 months** — meaning you'd recoup closing costs in under two years
-
-**Your appointment is confirmed:**
-📅 Thursday, March 26 at 2:00 PM
-Your loan officer will walk you through next steps and lock your rate.
-Confirmation #: **LOAN-84921**
-
-*Sources: VA Lender's Handbook (Ch. 6 — IRRRL), Lender IRRRL product guidelines*`,
-    });
+- Break-even point: **19 months** — meaning you'd recoup closing costs in under two years` });
+    events.push({ type: 'handoff', message: 'Calculator → Scheduler Agent' });
+    events.push({ type: 'scheduler_start', message: 'Loan Scheduler Agent activated' });
+    events.push({ type: 'scheduler_tool_call', message: 'appointment_scheduler', inputs: { day: 'Thursday', time: '2:00 PM', officer: 'Next available' } });
+    events.push({ type: 'scheduler_tool_result', message: 'Confirmed: Thu Mar 26 @ 2:00 PM • Ref #LOAN-84921' });
+    events.push({ type: 'partial_response', agent: 'scheduler', label: 'Loan Scheduler', content: `**Your appointment is confirmed:**
+📅 Thursday, March 26 at 2:00 PM with Sarah Chen
+Confirmation #: **LOAN-84921**` });
+    events.push({ type: 'handoff', message: 'Scheduler → Calendar Agent' });
+    events.push({ type: 'calendar_start', message: 'Calendar Agent activated' });
+    events.push({ type: 'calendar_tool_call', message: 'mcp_CalendarTools_graph_createEvent', inputs: { subject: 'IRRRL review and rate lock', start: '2026-03-26T14:00:00', end: '2026-03-26T15:00:00' } });
+    events.push({ type: 'calendar_tool_result', message: 'Calendar event created' });
+    events.push({ type: 'partial_response', agent: 'calendar', label: 'Calendar', content: `**Added to your calendar:**
+📆 IRRRL Review and Rate Lock — Thursday, March 26 at 2:00 PM (1 hour)
+Your loan officer Sarah Chen will walk you through next steps and lock your rate.` });
+    events.push({ type: 'complete', message: 'Response ready' });
   } else if (isRefi || isReuse) {
     events.push({ type: 'orchestrator_route', message: 'Routing to: VA Loan Advisor Agent' });
+    events.push({ type: 'plan', message: 'VA Loan Advisor' });
     events.push({ type: 'advisor_start', message: 'VA Loan Advisor Agent activated' });
     if (isRefi) {
       events.push({ type: 'advisor_source', message: 'va_guidelines.md', detail: 'Querying IRRRL eligibility rules' });
@@ -57,10 +61,11 @@ Confirmation #: **LOAN-84921**
       events.push({ type: 'advisor_source', message: 'va_guidelines.md', detail: 'Querying entitlement restoration' });
       events.push({ type: 'advisor_result', message: 'Benefit reuse answer composed', detail: '2 sources cited' });
     }
-    events.push({ type: 'orchestrator_synthesize', message: 'Formatting response...' });
     events.push({ type: 'complete', message: 'Response ready' });
     events.push({
-      type: 'final_response',
+      type: 'partial_response',
+      agent: 'advisor',
+      label: 'VA Loan Advisor',
       content: isRefi
         ? `**IRRRL Eligibility**
 
@@ -96,6 +101,8 @@ This is one of the most common misconceptions about the VA loan program.
     events.push({ type: 'complete', message: 'Response ready' });
     events.push({
       type: 'final_response',
+      agent: 'advisor',
+      label: 'VA Loan Advisor',
       content: `I'm here to help with your VA loan questions. Based on your query, here's what the lender knowledge base says:
 
 VA loans are one of the most powerful home financing benefits available to Veterans and active service members. They offer $0 down payment, no private mortgage insurance (PMI), and competitive interest rates backed by the Department of Veterans Affairs.
@@ -149,20 +156,26 @@ export function useAgentStream() {
 // ── Mock runner ───────────────────────────────────────────────────
 async function _runMock(query, setFlowEvents, setMessages) {
   const events = buildStream(query);
-  let finalContent = '';
   let id = Date.now();
 
   for (const evt of events) {
     await new Promise(r => setTimeout(r, 420 + Math.random() * 280));
-    if (evt.type === 'final_response') {
-      finalContent = evt.content;
+    if (evt.type === 'partial_response' || evt.type === 'final_response') {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: evt.content,
+        agent: evt.agent,
+        label: evt.label,
+      }]);
+    } else if (evt.type === 'handoff' || evt.type === 'plan') {
+      setMessages(prev => [...prev, {
+        role: evt.type,
+        content: evt.message,
+      }]);
+      setFlowEvents(prev => [...prev, { ...evt, id: id++ }]);
     } else {
       setFlowEvents(prev => [...prev, { ...evt, id: id++ }]);
     }
-  }
-
-  if (finalContent) {
-    setMessages(prev => [...prev, { role: 'assistant', content: finalContent }]);
   }
 }
 
@@ -183,7 +196,6 @@ async function _runLive(query, profileId, setFlowEvents, setMessages) {
     const reader  = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let finalContent = '';
 
     while (true) {
       const { done, value } = await reader.read();
@@ -198,8 +210,19 @@ async function _runLive(query, profileId, setFlowEvents, setMessages) {
         if (!json) continue;
         try {
           const evt = JSON.parse(json);
-          if (evt.type === 'final_response') {
-            finalContent = evt.content;
+          if (evt.type === 'partial_response' || evt.type === 'final_response') {
+            setMessages(prev => [...prev, {
+              role: 'assistant',
+              content: evt.content,
+              agent: evt.agent,
+              label: evt.label,
+            }]);
+          } else if (evt.type === 'handoff' || evt.type === 'plan') {
+            setMessages(prev => [...prev, {
+              role: evt.type,
+              content: evt.message,
+            }]);
+            setFlowEvents(prev => [...prev, { ...evt, id: id++ }]);
           } else {
             setFlowEvents(prev => [...prev, { ...evt, id: id++ }]);
           }
@@ -207,9 +230,6 @@ async function _runLive(query, profileId, setFlowEvents, setMessages) {
       }
     }
 
-    if (finalContent) {
-      setMessages(prev => [...prev, { role: 'assistant', content: finalContent }]);
-    }
   } catch (err) {
     setFlowEvents(prev => [...prev, {
       type: 'error',

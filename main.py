@@ -38,12 +38,19 @@ logging.basicConfig(
 _EVENT_PREFIXES: dict[str, str] = {
     "orchestrator_start":      "⬡  Orchestrator",
     "orchestrator_route":      "→  Orchestrator",
+    "plan":                    "⇄  Plan",
     "advisor_start":           "📚 Advisor",
     "advisor_source":          "🔍 Advisor",
     "advisor_result":          "✓  Advisor",
-    "action_start":            "⚙️  Action",
-    "action_tool_call":        "🔧 Action",
-    "action_tool_result":      "✓  Action",
+    "calculator_start":        "🧮 Calculator",
+    "calculator_tool_call":    "🔧 Calculator",
+    "calculator_tool_result":  "✓  Calculator",
+    "scheduler_start":         "📅 Scheduler",
+    "scheduler_tool_call":     "🔧 Scheduler",
+    "scheduler_tool_result":   "✓  Scheduler",
+    "calendar_start":          "📆 Calendar",
+    "calendar_tool_call":      "🔧 Calendar",
+    "calendar_tool_result":    "✓  Calendar",
     "handoff":                 "⇄  Handoff",
     "orchestrator_synthesize": "⬡  Orchestrator",
     "complete":                "✓  Complete",
@@ -67,12 +74,17 @@ def _print_event(event: dict) -> None:
     prefix = _EVENT_PREFIXES.get(etype, f"   {etype}")
     message = event.get("message", "")
 
-    if etype == "action_tool_call":
+    if etype in ("calculator_tool_call", "scheduler_tool_call", "calendar_tool_call"):
         inputs = event.get("inputs", {})
         inputs_str = ",  ".join(f"{k}={v}" for k, v in inputs.items())
         print(f"  {prefix}: {message}")
         if inputs_str:
             print(f"           {inputs_str}")
+    elif etype == "partial_response":
+        agent = event.get("label", event.get("agent", ""))
+        content = event.get("content", "")
+        print(f"\n  [{agent}]")
+        print(f"  {content[:200]}{'...' if len(content) > 200 else ''}\n")
     else:
         print(f"  {prefix}: {message}")
 

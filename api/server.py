@@ -29,6 +29,7 @@ from agents.orchestrator_agent import Orchestrator
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -57,7 +58,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception(
             "server: orchestrator initialization failed — "
-            "check PROJECT_ENDPOINT, MODEL_DEPLOYMENT_NAME, and az login status"
+            "check FOUNDRY_PROJECT_ENDPOINT, FOUNDRY_MODEL_DEPLOYMENT, and az login status"
         )
         app.state.orchestrator = None
 
@@ -138,10 +139,10 @@ async def chat(request: ChatRequest):
     Response:      text/event-stream — one JSON event per SSE frame.
 
     Each frame:    data: {"type": "...", "message": "..."}\n\n
-    Final frame:   data: {"type": "final_response", "content": "..."}\n\n
 
-    The stream ends after the final_response event. The client should
-    close the connection after receiving it.
+    Agent results arrive as partial_response events — one per agent —
+    so the UI can display each section as it becomes available. The
+    stream ends after the complete event.
     """
     orchestrator: Orchestrator | None = getattr(app.state, "orchestrator", None)
 

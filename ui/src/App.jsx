@@ -39,7 +39,7 @@ export default function App() {
               className="text-xs uppercase"
               style={{ color: '#93A8C0', letterSpacing: '0.06em' }}
             >
-              Multi-Agent Demo · Foundry IQ &amp; Custom MCP Server
+              Multi-Agent Demo · Foundry IQ &amp; MCP Server
             </div>
           </div>
         </div>

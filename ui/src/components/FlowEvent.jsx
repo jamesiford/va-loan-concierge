@@ -1,18 +1,25 @@
 import { useState } from 'react';
 
 const EVENT_CONFIG = {
-  orchestrator_start:     { label: 'Orchestrator',     color: '#4338CA', bg: '#EEF2FF', border: '#C7D2FE', icon: '⬡' },
-  orchestrator_route:     { label: 'Orchestrator',     color: '#4338CA', bg: '#EEF2FF', border: '#C7D2FE', icon: '→' },
-  advisor_start:          { label: 'Advisor Agent',    color: '#92400E', bg: '#FFFBEB', border: '#FDE68A', icon: '📚' },
-  advisor_source:         { label: 'Knowledge Source', color: '#92400E', bg: '#FFFBEB', border: '#FDE68A', icon: '🔍' },
-  advisor_result:         { label: 'Advisor Result',   color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0', icon: '✓' },
-  handoff:                { label: 'Agent Handoff',    color: '#6D28D9', bg: '#F5F3FF', border: '#DDD6FE', icon: '⇄' },
-  action_start:           { label: 'Action Agent',     color: '#1E40AF', bg: '#EFF6FF', border: '#BFDBFE', icon: '⚙️' },
-  action_tool_call:       { label: 'MCP Tool Call',    color: '#1E40AF', bg: '#EFF6FF', border: '#BFDBFE', icon: '🔧' },
-  action_tool_result:     { label: 'Tool Result',      color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0', icon: '✓' },
-  orchestrator_synthesize:{ label: 'Orchestrator',     color: '#4338CA', bg: '#EEF2FF', border: '#C7D2FE', icon: '⬡' },
-  complete:               { label: 'Complete',         color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0', icon: '✓' },
-  error:                  { label: 'Error',            color: '#B91C1C', bg: '#FEF2F2', border: '#FECACA', icon: '✗' },
+  orchestrator_start:      { label: 'Orchestrator',      color: '#002244', bg: '#E8EDF2', border: '#B0BEC5', icon: '⬡' },
+  orchestrator_route:      { label: 'Orchestrator',      color: '#002244', bg: '#E8EDF2', border: '#B0BEC5', icon: '→' },
+  plan:                    { label: 'Agent Plan',        color: '#9CA3AF', bg: '#F9FAFB', border: '#E5E7EB', icon: '⇄' },
+  advisor_start:           { label: 'Advisor Agent',     color: '#92400E', bg: '#FFFBEB', border: '#FDE68A', icon: '📚' },
+  advisor_source:          { label: 'Knowledge Source',  color: '#92400E', bg: '#FFFBEB', border: '#FDE68A', icon: '🔍' },
+  advisor_result:          { label: 'Advisor Result',    color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0', icon: '✓' },
+  handoff:                 { label: 'Agent Handoff',     color: '#9CA3AF', bg: '#F9FAFB', border: '#E5E7EB', icon: '⇄' },
+  calculator_start:        { label: 'Calculator Agent',  color: '#1E40AF', bg: '#EFF6FF', border: '#BFDBFE', icon: '🧮' },
+  calculator_tool_call:    { label: 'MCP Tool Call',     color: '#1E40AF', bg: '#EFF6FF', border: '#BFDBFE', icon: '🔧' },
+  calculator_tool_result:  { label: 'Tool Result',       color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0', icon: '✓' },
+  scheduler_start:         { label: 'Scheduler Agent',   color: '#0E7490', bg: '#ECFEFF', border: '#A5F3FC', icon: '📅' },
+  scheduler_tool_call:     { label: 'MCP Tool Call',     color: '#0E7490', bg: '#ECFEFF', border: '#A5F3FC', icon: '🔧' },
+  scheduler_tool_result:   { label: 'Tool Result',       color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0', icon: '✓' },
+  calendar_start:          { label: 'Calendar Agent',    color: '#BE185D', bg: '#FDF2F8', border: '#FBCFE8', icon: '📆' },
+  calendar_tool_call:      { label: 'MCP Tool Call',     color: '#BE185D', bg: '#FDF2F8', border: '#FBCFE8', icon: '🔧' },
+  calendar_tool_result:    { label: 'Tool Result',       color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0', icon: '✓' },
+  orchestrator_synthesize: { label: 'Orchestrator',      color: '#002244', bg: '#E8EDF2', border: '#B0BEC5', icon: '⬡' },
+  complete:                { label: 'Complete',          color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0', icon: '✓' },
+  error:                   { label: 'Error',             color: '#B91C1C', bg: '#FEF2F2', border: '#FECACA', icon: '✗' },
 };
 
 const FALLBACK = { label: 'Event', color: '#4338CA', bg: '#EEF2FF', border: '#C7D2FE', icon: '•' };
@@ -81,7 +88,7 @@ export default function FlowEvent({ event, isLatest, isPulsing }) {
                 {event.message}
               </code>
             </span>
-          ) : event.type === 'action_tool_call' ? (
+          ) : (event.type === 'calculator_tool_call' || event.type === 'scheduler_tool_call' || event.type === 'calendar_tool_call') ? (
             <span>
               Tool:{' '}
               <code

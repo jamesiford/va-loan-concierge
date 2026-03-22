@@ -10,14 +10,16 @@ import pytest
 from azure.core.exceptions import ResourceNotFoundError
 
 # Ensure required env vars exist before any module-level imports trigger them.
-os.environ.setdefault("PROJECT_ENDPOINT", "https://test.foundry.azure.com")
-os.environ.setdefault("MODEL_DEPLOYMENT_NAME", "gpt-4o-test")
-os.environ.setdefault("KNOWLEDGE_BASE_NAME", "kb-va-loan-test")
-os.environ.setdefault("AZURE_AI_SEARCH_ENDPOINT", "https://test-search.search.windows.net")
-os.environ.setdefault("PROJECT_RESOURCE_ID", "/subscriptions/00000000/resourceGroups/rg-test/providers/Microsoft.CognitiveServices/accounts/test/projects/test-proj")
-os.environ.setdefault("MCP_CONNECTION_NAME", "kb-va-loan-test-mcp")
-os.environ.setdefault("MCP_ENDPOINT", "https://test-mcp.azurewebsites.net/mcp")
-os.environ.setdefault("MCP_ACTION_CONNECTION_NAME", "va-loan-action-test-conn")
+os.environ.setdefault("FOUNDRY_PROJECT_ENDPOINT", "https://test.foundry.azure.com")
+os.environ.setdefault("FOUNDRY_MODEL_DEPLOYMENT", "gpt-4o-test")
+os.environ.setdefault("ADVISOR_KNOWLEDGE_BASE_NAME", "kb-va-loan-test")
+os.environ.setdefault("ADVISOR_SEARCH_ENDPOINT", "https://test-search.search.windows.net")
+os.environ.setdefault("FOUNDRY_PROJECT_RESOURCE_ID", "/subscriptions/00000000/resourceGroups/rg-test/providers/Microsoft.CognitiveServices/accounts/test/projects/test-proj")
+os.environ.setdefault("ADVISOR_MCP_CONNECTION", "kb-va-loan-test-mcp")
+os.environ.setdefault("MCP_TOOLS_ENDPOINT", "https://test-mcp.azurewebsites.net/mcp")
+os.environ.setdefault("MCP_TOOLS_CONNECTION", "va-loan-action-test-conn")
+os.environ.setdefault("SCHEDULER_CALENDAR_ENDPOINT", "https://test-workiq-calendar.mcp.microsoft.com")
+os.environ.setdefault("SCHEDULER_CALENDAR_CONNECTION", "WorkIQCalendar")
 
 
 # ---------------------------------------------------------------------------
@@ -76,11 +78,11 @@ def make_advisor_mock_client(
     return project_client
 
 
-def make_action_mock_client(
+def make_calculator_mock_client(
     response_text: str = "Your monthly savings are $142.",
 ) -> MagicMock:
     """
-    Build a mock AIProjectClient for ActionAgent.
+    Build a mock AIProjectClient for CalculatorAgent.
 
     Simulates a single Responses API call that returns one mcp_call item
     for refi_savings_calculator (Foundry handles MCP execution server-side).
@@ -120,6 +122,91 @@ def make_action_mock_client(
 
     response = MagicMock()
     response.output = [mcp_call]
+    response.output_text = response_text
+
+    openai_client.responses.create = AsyncMock(return_value=response)
+    client.get_openai_client = MagicMock(return_value=openai_client)
+
+    return client
+
+
+def make_scheduler_mock_client(
+    response_text: str = "Your appointment is confirmed.",
+) -> MagicMock:
+    """
+    Build a mock AIProjectClient for SchedulerAgent.
+
+    Simulates a single Responses API call that returns one mcp_call item
+    for appointment_scheduler (Foundry handles MCP execution server-side).
+    """
+    client = MagicMock()
+
+    # Agent registration.
+    version_obj = MagicMock()
+    version_obj.version = "1"
+    client.agents.create_version = AsyncMock(return_value=version_obj)
+
+    # Responses API — single call with one mcp_call item in output.
+    openai_client = MagicMock()
+
+    mcp_call = MagicMock()
+    mcp_call.type = "mcp_call"
+    mcp_call.name = "appointment_scheduler"
+    mcp_call.input = {
+        "preferred_day": "Thursday",
+        "preferred_time": "2:00 PM",
+    }
+    mcp_call.output = json.dumps({
+        "confirmed_day": "Thursday",
+        "calendar_date": "Thu Mar 26, 2026",
+        "confirmed_time": "2:00 PM",
+        "loan_officer": "Sarah Chen",
+        "confirmation_number": "LOAN-84921",
+        "appointment_type": "IRRRL review and rate lock",
+        "confirmation_message": "Your appointment is confirmed.",
+    })
+
+    response = MagicMock()
+    response.output = [mcp_call]
+    response.output_text = response_text
+
+    openai_client.responses.create = AsyncMock(return_value=response)
+    client.get_openai_client = MagicMock(return_value=openai_client)
+
+    return client
+
+
+def make_calendar_mock_client(
+    response_text: str = "Calendar event created for your appointment.",
+) -> MagicMock:
+    """
+    Build a mock AIProjectClient for CalendarAgent.
+
+    Simulates a single Responses API call that returns one mcp_call item
+    for createEvent (Foundry handles MCP execution server-side).
+    """
+    client = MagicMock()
+
+    # Agent registration.
+    version_obj = MagicMock()
+    version_obj.version = "1"
+    client.agents.create_version = AsyncMock(return_value=version_obj)
+
+    # Responses API — call with createEvent mcp_call item.
+    openai_client = MagicMock()
+
+    create_call = MagicMock()
+    create_call.type = "mcp_call"
+    create_call.name = "CreateEvent"
+    create_call.input = {
+        "subject": "IRRRL review and rate lock",
+        "start": "2026-03-26T14:00:00",
+        "end": "2026-03-26T15:00:00",
+    }
+    create_call.output = json.dumps({"status": "created", "eventId": "abc123"})
+
+    response = MagicMock()
+    response.output = [create_call]
     response.output_text = response_text
 
     openai_client.responses.create = AsyncMock(return_value=response)

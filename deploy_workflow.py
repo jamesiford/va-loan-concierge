@@ -1,8 +1,8 @@
 """
 Deploy the VA Loan Concierge workflow agent to Azure AI Foundry.
 
-Registers all three sub-agents (orchestrator, advisor, action) and uploads
-the workflow YAML as a WorkflowAgentDefinition.
+Registers all five sub-agents (orchestrator, advisor, calculator, scheduler,
+calendar) and uploads the workflow YAML as a WorkflowAgentDefinition.
 
 Prerequisites:
   - az login (DefaultAzureCredential uses AzureCliCredential locally)
@@ -38,7 +38,9 @@ class _WorkflowPreviewPolicy(SansIOHTTPPolicy):
         request.http_request.headers["Foundry-Features"] = "WorkflowAgents=V1Preview"
 
 from agents.advisor_agent import AdvisorAgent
-from agents.action_agent import ActionAgent
+from agents.calculator_agent import CalculatorAgent
+from agents.calendar_agent import CalendarAgent
+from agents.scheduler_agent import SchedulerAgent
 
 load_dotenv()
 
@@ -60,7 +62,7 @@ You must ALWAYS respond with ONLY a valid JSON object — no explanation, no
 markdown, no code fences, no preamble. Just the raw JSON.
 
 Output format (exactly):
-{"needs_advisor": <bool>, "needs_action": <bool>}
+{"needs_advisor": <bool>, "needs_calculator": <bool>, "needs_scheduler": <bool>}
 
 Routing rules:
 
@@ -70,12 +72,15 @@ Routing rules:
       second-time use, surviving spouse rules, or anything the Veteran needs to
       understand before taking action.
 
-  needs_action = true when the query involves:
+  needs_calculator = true when the query involves:
     — refinance savings calculations, monthly savings, break-even timelines,
-      closing costs, VA net tangible benefit test, or scheduling/booking an
-      appointment with a loan officer.
+      closing costs, VA net tangible benefit test.
 
-Both may be true for mixed queries (e.g. "Am I eligible AND show me my savings
+  needs_scheduler = true when the query involves:
+    — scheduling/booking an appointment with a loan officer, checking
+      availability, creating calendar events, managing meetings.
+
+Multiple may be true for mixed queries (e.g. "Am I eligible AND show me my savings
 AND book Thursday").
 
 Default needs_advisor to true if the query is ambiguous or unclear.
@@ -89,16 +94,22 @@ async def main() -> None:
     logger.info("Step 1/3: Registering sub-agents...")
 
     advisor = AdvisorAgent()
-    action = ActionAgent()
+    calculator = CalculatorAgent()
+    scheduler = SchedulerAgent()
+    calendar = CalendarAgent()
 
     await asyncio.gather(
         advisor.initialize(),
-        action.initialize(),
+        calculator.initialize(),
+        scheduler.initialize(),
+        calendar.initialize(),
     )
     logger.info(
-        "Sub-agents registered — advisor=%s, action=%s",
+        "Sub-agents registered — advisor=%s, calculator=%s, scheduler=%s, calendar=%s",
         advisor.agent_version,
-        action.agent_id,
+        calculator.agent_id,
+        scheduler.agent_id,
+        calendar.agent_id,
     )
 
     # ── Step 2: Register workflow-specific orchestrator ──────────────────────
@@ -106,7 +117,7 @@ async def main() -> None:
 
     credential = DefaultAzureCredential()
     client = AIProjectClient(
-        endpoint=os.environ["PROJECT_ENDPOINT"],
+        endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
         credential=credential,
         per_call_policies=[_WorkflowPreviewPolicy()],
     )
@@ -115,7 +126,7 @@ async def main() -> None:
         agent_name="va-loan-orchestrator",
         description="VA Loan Concierge — routing classifier (workflow mode)",
         definition=PromptAgentDefinition(
-            model=os.environ["MODEL_DEPLOYMENT_NAME"],
+            model=os.environ["FOUNDRY_MODEL_DEPLOYMENT"],
             instructions=WORKFLOW_ORCHESTRATOR_INSTRUCTIONS,
         ),
     )
@@ -128,7 +139,7 @@ async def main() -> None:
 
     workflow_version = await client.agents.create_version(
         agent_name="va-loan-concierge-workflow",
-        description="VA Loan Concierge — multi-agent workflow (advisor + action)",
+        description="VA Loan Concierge — multi-agent workflow (advisor + calculator + scheduler + calendar)",
         definition=WorkflowAgentDefinition(workflow=workflow_yaml),
     )
     logger.info(
@@ -138,7 +149,9 @@ async def main() -> None:
 
     # ── Cleanup ─────────────────────────────────────────────────────────────
     await advisor.close()
-    await action.close()
+    await calculator.close()
+    await scheduler.close()
+    await calendar.close()
     await client.close()
     await credential.close()
 

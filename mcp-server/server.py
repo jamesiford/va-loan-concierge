@@ -139,7 +139,8 @@ def appointment_scheduler(
     preferred_day: str,
     preferred_time: str,
     loan_officer: str = "",
-    appointment_type: str = "IRRRL review and rate lock",
+    appointment_type: str = "VA Loan Consultation",
+    **_extra,
 ) -> dict:
     confirmed_day = _normalize_day(preferred_day)
     available = _AVAILABLE_SLOTS[confirmed_day]
@@ -234,7 +235,7 @@ TOOL_SCHEMAS = [
                 },
                 "appointment_type": {
                     "type": "string",
-                    "description": "Type of consultation (defaults to 'IRRRL review and rate lock').",
+                    "description": "Type of consultation (defaults to 'VA Loan Consultation').",
                 },
             },
             "required": ["preferred_day", "preferred_time"],

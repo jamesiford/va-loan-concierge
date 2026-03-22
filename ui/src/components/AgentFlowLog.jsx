@@ -2,9 +2,11 @@ import { useRef, useEffect } from 'react';
 import FlowEvent from './FlowEvent';
 
 const LEGEND = [
-  { label: 'Orchestrator', color: '#4338CA' },
-  { label: 'Advisor Agent', color: '#92400E' },
-  { label: 'Action Agent',  color: '#1E40AF' },
+  { label: 'Orchestrator',    color: '#002244' },
+  { label: 'Advisor Agent',   color: '#92400E' },
+  { label: 'Calculator Agent', color: '#1E40AF' },
+  { label: 'Scheduler Agent',  color: '#0E7490' },
+  { label: 'Calendar Agent',   color: '#BE185D' },
 ];
 
 const FOOTER_BADGES = [
