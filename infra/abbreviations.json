@@ -1,0 +1,11 @@
+{
+  "aiServicesAccount": "ais-",
+  "aiProject": "proj-",
+  "azureAISearch": "srch-",
+  "storageAccount": "st",
+  "functionApp": "func-",
+  "appServicePlan": "asp-",
+  "logAnalyticsWorkspace": "log-",
+  "applicationInsights": "appi-",
+  "resourceGroup": "rg-"
+}

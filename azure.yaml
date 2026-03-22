@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# VA Loan Concierge — Azure Developer CLI (azd) project definition
+# ---------------------------------------------------------------------------
+# Usage:
+#   azd up       — provision infrastructure + deploy code + register agents
+#   azd down     — tear everything down
+#
+# Manual step after azd up:
+#   Configure Work IQ Calendar connection (see README)
+# ---------------------------------------------------------------------------
+
+name: va-loan-concierge
+
+metadata:
+  template: va-loan-concierge
+
+infra:
+  provider: bicep
+  path: infra
+
+services:
+  mcp-server:
+    host: function
+    language: python
+    project: ./mcp-server
+
+hooks:
+  postprovision:
+    shell: sh
+    run: infra/hooks/postprovision.sh
+
+  postdeploy:
+    shell: sh
+    run: infra/hooks/postdeploy.sh
