@@ -132,29 +132,66 @@ Plus 15 RBAC role assignments and 2 RemoteTool project connections — all autom
 After provisioning completes, `azd up` automatically:
 1. Uploads the 3 knowledge documents to blob storage
 2. Creates an AI Search data source, index, skillset, and indexer (blob → embeddings → vector index)
-3. Creates the Foundry IQ Knowledge Base wrapping the search index
-4. Provisions RemoteTool connections for the KB MCP and custom MCP endpoints
-5. Deploys the MCP server to the Function App via `func azure functionapp publish`
-6. Writes `.env` from azd environment values
-7. Registers all 6 Foundry agents and uploads the workflow definition
+3. Provisions RemoteTool connections for the KB MCP and custom MCP endpoints
+4. Deploys the MCP server to the Function App via `func azure functionapp publish`
+5. Writes `.env` from azd environment values
+6. Registers all 6 Foundry agents and uploads the workflow definition
 
 > **Updating knowledge sources:** To add or update documents, upload new files to the `knowledge-base` blob container and re-run the Search indexer. No redeployment needed.
 
-### Configure Work IQ Calendar (Manual Step)
+### Manual Step 1: Create Foundry IQ Knowledge Base
 
-The Calendar Agent requires a Work IQ Calendar connection, which needs an M365 Copilot license and must be configured in the Foundry portal:
+The Advisor Agent requires a Foundry IQ Knowledge Base that wraps the AI Search index created by `azd up`. This must be created manually in the Foundry portal because the SDK for programmatic KB creation is in preview and unreliable.
+
+1. Open the [Azure AI Foundry portal](https://ai.azure.com) → your project (`proj-{env}`)
+2. Go to **Knowledge** (left sidebar) → **+ New knowledge base**
+3. Fill in the following:
+
+| Field | Value |
+|---|---|
+| **Name** | `kb-va-loan-guidelines` |
+| **Description** | `VA Loan Concierge knowledge base for the Advisor Agent. Answers Veteran questions about VA loan eligibility, IRRRL qualification, funding fees, entitlement calculations, lender products, and the homebuying process with cited, grounded responses.` |
+
+4. Under **Knowledge sources**, click **+ Add source** → **Azure AI Search index**:
+   - Select the search service (`srch-{env}`) and index (`kb-va-loan-guidelines`)
+   - Source description:
+     > VA loan knowledge base containing eligibility guidelines, lender product details (IRRRL, Cash-Out Refi, VA Jumbo, VA Renovation), and borrower FAQ covering process steps, myths, and edge cases. Sources: VA guidelines, Valor Home Lending products, loan process FAQ.
+
+5. Under **Retrieval settings**:
+   - **Output mode**: `Extractive data`
+   - **Reasoning effort**: `Low`
+   - **Retrieval instructions**:
+     > You are answering questions from Veterans about VA home loans. Always search all knowledge sources to find relevant information. Prioritize VA guidelines for eligibility and regulatory questions. Use lender products for rate, pricing, and product-specific questions. Use the FAQ for process steps, common misconceptions, and edge cases. If multiple sources are relevant, synthesize them into a cohesive answer. Always cite which source supports each claim.
+   - **Answer instructions**:
+     > Provide clear, accurate answers grounded in the knowledge sources. Use a professional but approachable tone appropriate for Veterans. Structure longer answers with bullet points or numbered lists. When citing sources, reference the document name (e.g., va_guidelines.md). If information is not found in the knowledge base, say so clearly — do not speculate or invent facts. For calculations or scheduling requests, note that those are handled by separate specialist agents.
+
+6. Under **Model configuration**:
+   - Select the embedding model deployment (`text-embedding-3-small`)
+   - Select the chat model deployment (e.g. `gpt-4.1`)
+
+7. Click **Create**
+
+After creation, verify the KB name in your `.env` matches:
+```
+ADVISOR_KNOWLEDGE_BASE_NAME=kb-va-loan-guidelines
+```
+
+### Manual Step 2: Configure Work IQ Calendar (Optional)
+
+The Calendar Agent requires a Work IQ Calendar connection for M365 calendar integration. This needs an M365 Copilot license and must be configured in the Foundry portal.
 
 1. Open the Foundry portal → your project → **Connections**
-2. Add a **Work IQ Calendar** connection
-3. Copy the MCP endpoint URL and connection name, then set them:
+2. Click **+ New connection** → **Work IQ Calendar**
+3. Follow the OAuth consent flow to authorize calendar access
+4. Copy the MCP endpoint URL and connection name, then set them:
 
 ```bash
 azd env set SCHEDULER_CALENDAR_ENDPOINT <endpoint-url>
 azd env set SCHEDULER_CALENDAR_CONNECTION <connection-name>
-azd hooks run postprovision    # re-registers agents with calendar connection
+azd hooks run postprovision    # re-writes .env and re-registers agents with calendar connection
 ```
 
-> **Note:** The demo works without the Calendar Agent — the Advisor, Calculator, and Scheduler agents function independently. The calendar step will simply be skipped if this connection is not configured.
+> **Note:** The demo works without either manual step partially configured — the Advisor Agent needs the KB to answer questions, but the Calculator and Scheduler agents function independently. The Calendar Agent step is skipped if the Work IQ Calendar connection is not configured.
 
 ### Run the Demo
 
@@ -220,7 +257,6 @@ va-loan-concierge/
 ├── profiles.py                  # DEMO_PROFILES + context injection helpers
 ├── workflow.yaml                # Foundry Workflow Agent definition
 ├── deploy_workflow.py           # Registers sub-agents + uploads workflow
-├── create_kb.py                 # Creates Foundry IQ Knowledge Base via azure-search-documents SDK
 ├── requirements.txt
 │
 ├── infra/                       # Infrastructure-as-code (Bicep)
@@ -235,7 +271,7 @@ va-loan-concierge/
 │   │   ├── monitoring.bicep     # Log Analytics + App Insights
 │   │   └── rbac.bicep           # All role assignments
 │   └── hooks/
-│       └── postprovision.ps1    # All post-provision: blob upload, Search index, KB, connections, MCP deploy, .env, agent registration
+│       └── postprovision.ps1    # All post-provision: blob upload, Search index, connections, MCP deploy, .env, agent registration
 │
 ├── agents/
 │   ├── orchestrator_agent.py    # Orchestrator — LLM routing + sub-agent coordination
@@ -397,7 +433,7 @@ Three selectable profiles inject personalized context into every agent query:
 | 1 | Foundry IQ Knowledge Base | Advisor Agent grounded in Azure AI Search KB via MCP (3 knowledge sources, cited responses) |
 | 2 | Azure-Hosted MCP Server | Calculator + Scheduler agents calling tools via custom Azure Function App MCP endpoint |
 | 3 | Workflow Agent | Declarative YAML orchestration deployed to Foundry for Copilot Studio / Teams path |
-| 4 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 15 RBAC assignments, zero manual steps (except calendar) |
+| 4 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 15 RBAC assignments; two manual portal steps (KB + calendar) |
 | — | Human-in-the-Loop | Multi-turn calculator retry loops, appointment confirm/reschedule/decline, workflow parity |
 
 ### Planned

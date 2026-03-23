@@ -3,8 +3,14 @@
 # ---------------------------------------------------------------------------
 # Creates resources that cannot be provisioned via Bicep:
 #   1. Upload knowledge docs to blob storage
-#   2. Create AI Search data source, index, and indexer (pulls from blob)
+#   2. Create AI Search data source, index, skillset, and indexer (blob → embeddings → vector index)
 #   3. Create RemoteTool project connections (KB MCP + custom MCP)
+#   4. Deploy MCP server Function App
+#   5. Write .env from azd env values
+#   6. Register Foundry agents
+#
+# NOTE: Foundry IQ Knowledge Base creation is a MANUAL step after deployment.
+#       See README.md for instructions.
 # ---------------------------------------------------------------------------
 
 $ErrorActionPreference = "Stop"
@@ -280,34 +286,7 @@ try {
     Write-Host "  MCP tools connection: HTTP $($_.Exception.Response.StatusCode.value__) - $($_.ErrorDetails.Message)"
 }
 
-# -- 8. Create Foundry IQ Knowledge Base (wraps the search index) --
-
-Write-Host ""
-Write-Host "=== Creating Foundry IQ Knowledge Base ==="
-
-# Ensure the SDK is installed
-pip install --quiet azure-search-documents==11.7.0b2
-
-# Write a temporary .env so create_kb.py can load it
-$tempEnv = @"
-ADVISOR_SEARCH_ENDPOINT=$SEARCH_ENDPOINT
-AI_SERVICES_NAME=$AI_SERVICES_NAME
-EMBEDDING_MODEL_DEPLOYMENT=$EMBEDDING_MODEL
-"@
-Set-Content -Path ".env.kb-temp" -Value $tempEnv
-$env:DOTENV_PATH = ".env.kb-temp"
-
-# Set env vars directly for the script
-$env:ADVISOR_SEARCH_ENDPOINT = $SEARCH_ENDPOINT
-$env:AI_SERVICES_NAME = $AI_SERVICES_NAME
-$env:EMBEDDING_MODEL_DEPLOYMENT = $EMBEDDING_MODEL
-$env:FOUNDRY_MODEL_DEPLOYMENT = (azd env get-value FOUNDRY_MODEL_DEPLOYMENT 2>$null)
-
-python create_kb.py
-
-Remove-Item ".env.kb-temp" -ErrorAction SilentlyContinue
-
-# -- 9. Save connection names to azd env for use by app --
+# -- 8. Save connection names to azd env for use by app --
 
 azd env set ADVISOR_KNOWLEDGE_BASE_NAME $KB_NAME
 azd env set ADVISOR_MCP_CONNECTION $ADVISOR_MCP_CONNECTION
@@ -373,15 +352,15 @@ python deploy_workflow.py
 Write-Host ""
 Write-Host "=== postprovision complete ==="
 Write-Host ""
-Write-Host "  Test in Foundry portal playground or run locally:"
+Write-Host "  MANUAL STEPS REQUIRED (see README.md for details):"
+Write-Host ""
+Write-Host "  1. Create Foundry IQ Knowledge Base in the Foundry portal"
+Write-Host "     (wraps the search index that was just created)"
+Write-Host ""
+Write-Host "  2. (Optional) Configure Work IQ Calendar connection"
+Write-Host "     for M365 calendar integration"
+Write-Host ""
+Write-Host "  After completing manual steps, run locally:"
 Write-Host "    uvicorn api.server:app --reload --port 8000"
 Write-Host "    cd ui && npm run dev"
-Write-Host ""
-Write-Host "MANUAL STEP (optional):"
-Write-Host "  Configure Work IQ Calendar connection in the Foundry portal:"
-Write-Host "    1. Go to the Foundry project -> Connections"
-Write-Host "    2. Add a Work IQ Calendar connection"
-Write-Host "    3. Set the following env vars:"
-Write-Host "       azd env set SCHEDULER_CALENDAR_ENDPOINT <endpoint-url>"
-Write-Host "       azd env set SCHEDULER_CALENDAR_CONNECTION <connection-name>"
 Write-Host ""

@@ -114,32 +114,19 @@ class TestCitationExtraction:
         self.agent = AdvisorAgent()
 
     def test_citation_markers_parsed_from_text(self):
-        text = "The IRRRL is available 【1:0†va_guidelines】 with no appraisal 【1:1†lender_products】."
-        citations = self.agent._extract_citations(text, MagicMock(output=[]))
-        assert citations == ["va_guidelines", "lender_products"]
+        text = "The IRRRL is available 【1:0†va_guidelines.md】 with no appraisal 【1:1†lender_products.md】."
+        citations = self.agent._extract_citations(text)
+        assert citations == ["va_guidelines.md", "lender_products.md"]
 
     def test_duplicate_citations_deduplicated(self):
-        text = "See 【1:0†va_guidelines】 and also 【2:0†va_guidelines】."
-        citations = self.agent._extract_citations(text, MagicMock(output=[]))
-        assert citations.count("va_guidelines") == 1
+        text = "See 【1:0†va_guidelines.md】 and also 【2:0†va_guidelines.md】."
+        citations = self.agent._extract_citations(text)
+        assert citations.count("va_guidelines.md") == 1
 
-    def test_no_markers_falls_back_to_annotations(self):
-        ann = MagicMock()
-        ann.type = "url_citation"
-        ann.title = "VA Guidelines"
-
-        content = MagicMock()
-        content.annotations = [ann]
-
-        msg = MagicMock()
-        msg.type = "message"
-        msg.content = [content]
-
-        response = MagicMock()
-        response.output = [msg]
-
-        citations = self.agent._extract_citations("No markers here.", response)
-        assert "VA Guidelines" in citations
+    def test_generic_labels_filtered(self):
+        text = "See 【1:0†source】 and 【1:1†doc_0】 and 【1:2†va_guidelines.md】."
+        citations = self.agent._extract_citations(text)
+        assert citations == ["va_guidelines.md"]
 
     async def test_citation_markers_emitted_as_advisor_source_events(self):
         text = "Eligible 【1:0†va_guidelines】."

@@ -29,7 +29,6 @@ import logging
 import os
 import re
 from typing import AsyncGenerator
-from urllib.parse import urlparse
 
 import requests
 from azure.ai.projects.aio import AIProjectClient
@@ -50,10 +49,11 @@ ADVISOR_INSTRUCTIONS = (
     "You MUST use the knowledge base tool to answer every question. "
     "You MUST NEVER answer from your own training knowledge under any circumstances — "
     "always retrieve from the knowledge base first.\n\n"
-    "CITATION RULE (mandatory): Every factual claim in your response MUST be followed "
-    "immediately by a citation marker in this exact format: \u3010message_idx:search_idx\u2020source_name\u3011\n"
-    "You MUST include at least one citation marker in every response that uses knowledge base content. "
-    "Do not summarise without citing. Do not omit citation markers.\n\n"
+    "CITATION RULE (mandatory): Every factual claim in your response MUST include a citation. "
+    "When citing, you MUST use the actual source document filename (e.g. va_guidelines.md, "
+    "lender_products.md, loan_process_faq.md) as the citation label — NEVER use generic labels "
+    "like 'doc_0', 'doc_1', or 'source'. The knowledge base results include the source filename; "
+    "always use it. Do not summarize without citing. Do not omit citations.\n\n"
     "If the knowledge base does not contain the answer, respond with exactly: 'I don't know.'\n"
     "Focus only on answering the VA loan question — do not mention calculations or scheduling."
 )
@@ -220,134 +220,25 @@ class AdvisorAgent:
     # Citation helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _filename_from_url(url: str) -> str:
-        """Return just the filename portion of a blob URL, or the raw value if not a URL."""
-        try:
-            return os.path.basename(urlparse(url).path) or url
-        except Exception:
-            return url
+    # Labels to filter out — generic placeholders the model sometimes uses
+    _GENERIC_LABELS = {"source", "sources", "document", "documents", ""}
+    _DOC_N_RE = re.compile(r"^doc_\d+$")
 
-    def _replace_citation_labels(self, text: str, response) -> str:
+    def _extract_citations(self, response_text: str) -> list[str]:
         """
-        Replace the generic †source label inside each 【idx:idx†source】 marker
-        with the actual filename from the corresponding url_citation annotation.
+        Return a deduplicated list of cited source filenames parsed from
+        【idx:idx†source_name】 markers in the response text.
 
-        Annotations carry start_index/end_index positions that map exactly to
-        the markers in the text.  We collect all replacements, sort them in
-        reverse position order so that earlier indices aren't invalidated, then
-        apply them as string slice swaps.
+        The agent instructions tell the model to use actual filenames
+        (e.g. ``va_guidelines.md``) as citation labels.  Generic labels
+        like ``source`` or ``doc_0`` are filtered out.
         """
-        replacements: list[tuple[int, int, str]] = []  # (start, end, new_text)
-        try:
-            for item in response.output or []:
-                item_type = getattr(item, "type", None) or (
-                    item.get("type") if isinstance(item, dict) else None
-                )
-                if item_type != "message":
-                    continue
-                content_list = getattr(item, "content", None) or (
-                    item.get("content") if isinstance(item, dict) else []
-                )
-                for content in content_list or []:
-                    for ann in getattr(content, "annotations", None) or (
-                        content.get("annotations") if isinstance(content, dict) else []
-                    ) or []:
-                        ann_type = getattr(ann, "type", None) or (
-                            ann.get("type") if isinstance(ann, dict) else None
-                        )
-                        if ann_type != "url_citation":
-                            continue
-                        start = getattr(ann, "start_index", None) or (
-                            ann.get("start_index") if isinstance(ann, dict) else None
-                        )
-                        end = getattr(ann, "end_index", None) or (
-                            ann.get("end_index") if isinstance(ann, dict) else None
-                        )
-                        raw_url = getattr(ann, "title", None) or getattr(ann, "url", None) or (
-                            ann.get("title") or ann.get("url") if isinstance(ann, dict) else None
-                        )
-                        if start is None or end is None or not raw_url:
-                            continue
-                        filename = self._filename_from_url(raw_url)
-                        # The annotated slice is the full 【...†source】 marker.
-                        # Build the replacement with the real filename.
-                        original = text[start:end]
-                        replaced = _CITATION_RE.sub(
-                            lambda m, fn=filename: (
-                                "\u3010"
-                                + m.group(0)[1:-1].rsplit("\u2020", 1)[0]
-                                + "\u2020" + fn + "\u3011"
-                            ),
-                            original,
-                        )
-                        if replaced != original:
-                            replacements.append((start, end, replaced))
-        except Exception:
-            logger.debug("advisor_agent: citation label replacement failed", exc_info=True)
-            return text
-
-        # Apply in reverse order to preserve earlier indices.
-        for start, end, new_text in sorted(replacements, key=lambda t: t[0], reverse=True):
-            text = text[:start] + new_text + text[end:]
-        return text
-
-    def _extract_citations(self, response_text: str, response) -> list[str]:
-        """
-        Return a deduplicated list of human-readable cited source filenames.
-
-        Strategy 1 — url_citation / file_citation annotations on the message output
-        item.  These carry the actual blob URL in their title/url field, from which
-        we extract just the filename (e.g. 'va_guidelines.md').  This is the most
-        reliable source and is tried first.
-
-        Strategy 2 — 【idx:idx†source_name】 markers parsed from the response text,
-        used as a fallback.  Generic labels like 'source' are filtered out.
-        """
-        # ── Strategy 1: url_citation annotations (preferred) ──────────────────
-        cited: list[str] = []
-        seen: set[str] = set()
-        try:
-            for item in response.output or []:
-                item_type = getattr(item, "type", None) or (
-                    item.get("type") if isinstance(item, dict) else None
-                )
-                if item_type != "message":
-                    continue
-                content_list = getattr(item, "content", None) or (
-                    item.get("content") if isinstance(item, dict) else []
-                )
-                for content in content_list or []:
-                    for ann in getattr(content, "annotations", None) or (
-                        content.get("annotations") if isinstance(content, dict) else []
-                    ) or []:
-                        ann_type = getattr(ann, "type", None) or (
-                            ann.get("type") if isinstance(ann, dict) else None
-                        )
-                        raw: str | None = None
-                        if ann_type == "url_citation":
-                            raw = getattr(ann, "title", None) or getattr(ann, "url", None) or (
-                                ann.get("title") or ann.get("url") if isinstance(ann, dict) else None
-                            )
-                        elif ann_type == "file_citation":
-                            raw = getattr(ann, "filename", None) or (
-                                ann.get("filename") if isinstance(ann, dict) else None
-                            )
-                        if raw:
-                            name = self._filename_from_url(raw)
-                            if name and name not in seen:
-                                seen.add(name)
-                                cited.append(name)
-        except Exception:
-            logger.debug("advisor_agent: annotation extraction failed", exc_info=True)
-
-        if cited:
-            return cited
-
-        # ── Strategy 2: text markers, filter generic labels ───────────────────
-        _GENERIC = {"source", "sources", "document", "documents", ""}
-        raw_markers = list(dict.fromkeys(_CITATION_RE.findall(response_text)))
-        return [s for s in raw_markers if s.lower() not in _GENERIC]
+        raw = list(dict.fromkeys(_CITATION_RE.findall(response_text)))
+        return [
+            s for s in raw
+            if s.lower() not in self._GENERIC_LABELS
+            and not self._DOC_N_RE.match(s)
+        ]
 
     # ------------------------------------------------------------------
     # Run
@@ -394,7 +285,7 @@ class AdvisorAgent:
             return
 
         # Emit named citations; skip if the KB only returned a generic label.
-        citations = self._extract_citations(response_text, response)
+        citations = self._extract_citations(response_text)
         for source in citations:
             yield {
                 "type": "advisor_source",
@@ -410,7 +301,6 @@ class AdvisorAgent:
             "message": f"Answer ready — {chunk_count} chunk(s) retrieved from Knowledge Base",
         }
 
-        response_text = self._replace_citation_labels(response_text, response)
         yield {"type": "_advisor_text", "text": response_text}
 
     # ------------------------------------------------------------------

@@ -396,7 +396,6 @@ va-loan-concierge/
 ├── profiles.py                  # DEMO_PROFILES + _profile_context_block + _demo_context_block
 ├── workflow.yaml                # Foundry Workflow Agent definition (orchestrator → advisor/calculator/scheduler/calendar)
 ├── deploy_workflow.py           # Registers sub-agents + uploads workflow to Foundry
-├── create_kb.py                 # Creates Foundry IQ Knowledge Base (azure-search-documents SDK)
 │
 ├── infra/                       # Infrastructure-as-code (Bicep + azd hooks)
 │   ├── main.bicep               # Orchestrator — wires all modules, defines outputs
@@ -410,7 +409,7 @@ va-loan-concierge/
 │   │   ├── monitoring.bicep     # Log Analytics + App Insights
 │   │   └── rbac.bicep           # All role assignments (15 total)
 │   └── hooks/
-│       └── postprovision.ps1    # All post-provision: blob upload, Search index/skillset/indexer, Foundry IQ KB, connections, MCP deploy, .env, agent registration
+│       └── postprovision.ps1    # All post-provision: blob upload, Search index/skillset/indexer, connections, MCP deploy, .env, agent registration
 │
 ├── api/
 │   ├── __init__.py
@@ -686,11 +685,15 @@ auth. The agent is registered with `MCPTool` (not `FileSearchTool` or `AzureAISe
 - `initialize()` PUTs a `RemoteTool` project connection via ARM pointing at
   `{ADVISOR_SEARCH_ENDPOINT}/knowledgebases/{ADVISOR_KNOWLEDGE_BASE_NAME}/mcp?api-version=2025-11-01-preview`
 - The agent is registered with `MCPTool(server_label="knowledge-base", allowed_tools=["knowledge_base_retrieve"], project_connection_id=ADVISOR_MCP_CONNECTION)`
-- After the Responses API call, `response.output` contains `url_citation` annotations on
-  the message item; `_extract_citations()` extracts filenames from blob URLs and emits them
-  as `advisor_source` SSE events
-- `_replace_citation_labels()` rewrites `【idx†source】` markers in the response text to
-  `【idx†va_guidelines.md】` etc. using annotation positions
+- After the Responses API call, `_extract_citations()` parses `【idx†filename】` markers
+  from the response text and emits them as `advisor_source` SSE events
+- The agent instructions tell the model to use real filenames (e.g. `va_guidelines.md`) as
+  citation labels; generic labels like `doc_0` or `source` are filtered out
+
+**KB creation:** The Foundry IQ Knowledge Base is created **manually** in the Foundry portal
+after `azd up` completes. See README.md for step-by-step instructions with exact property
+values. The `azure-search-documents` SDK for programmatic KB creation is in preview and
+was unreliable, so this step is portal-only.
 
 **Required env vars:**
 - `ADVISOR_KNOWLEDGE_BASE_NAME` — KB name in Azure AI Search (e.g. `kb-va-loan-guidelines`)
@@ -849,10 +852,12 @@ agents with a single `azd up` command. `azd down` tears everything down cleanly.
    - Creates Search data source, index (with vector field), skillset (embedding generation),
      and indexer (blob → skillset → index)
    - Provisions RemoteTool connections for KB MCP and custom MCP
-   - Creates Foundry IQ Knowledge Base via `create_kb.py` (wraps search index)
    - Deploys MCP server to Function App via `func azure functionapp publish --python`
    - Writes `.env` from azd env values
    - Registers all Foundry agents via `deploy_workflow.py`
+3. **Manual steps after `azd up`** (see README.md):
+   - Create Foundry IQ Knowledge Base in the portal (wraps the search index)
+   - (Optional) Configure Work IQ Calendar connection
 
 **Implementation details:**
 - Hooks are PowerShell (`.ps1`), using `shell: pwsh` in `azure.yaml` (no separate postdeploy)
@@ -860,7 +865,8 @@ agents with a single `azd up` command. `azd down` tears everything down cleanly.
 - Storage uses `allowSharedKeyAccess: false` and MI-based auth (policy requirement)
 - All API versions use `2025-04-01-preview` for Foundry resources
 - Search API uses `2024-11-01-preview` for data plane calls
-- Foundry IQ Knowledge Base created via `create_kb.py` using `azure-search-documents==11.7.0b2`
+- Foundry IQ KB creation is manual (portal) — the `azure-search-documents` SDK for
+  programmatic KB creation is in preview and was unreliable
 - Separate search token needed: `az account get-access-token --resource https://search.azure.com`
 
 **Naming convention:** `{abbreviation}{environmentName}` — e.g. `ais-valc-demo-abc`,
@@ -869,8 +875,11 @@ agents with a single `azd up` command. `azd down` tears everything down cleanly.
 **Region:** User-selectable during `azd up` from curated list (eastus, eastus2, westus,
 westus3, swedencentral).
 
-**One manual step:** Work IQ Calendar connection must be configured in Foundry portal
-(requires M365 Copilot license). Demo works without it.
+**Two manual steps after `azd up`:**
+1. Create Foundry IQ Knowledge Base in the portal (SDK-based creation was unreliable)
+2. (Optional) Work IQ Calendar connection (requires M365 Copilot license)
+
+See README.md for detailed instructions with exact property values.
 
 ---
 
