@@ -96,20 +96,28 @@ async def main() -> None:
     advisor = AdvisorAgent()
     calculator = CalculatorAgent()
     scheduler = SchedulerAgent()
-    calendar = CalendarAgent()
 
-    await asyncio.gather(
+    init_tasks = [
         advisor.initialize(),
         calculator.initialize(),
         scheduler.initialize(),
-        calendar.initialize(),
-    )
+    ]
+
+    # Calendar agent requires manual Work IQ Calendar connection — skip if not configured
+    calendar: CalendarAgent | None = None
+    if os.environ.get("SCHEDULER_CALENDAR_ENDPOINT"):
+        calendar = CalendarAgent()
+        init_tasks.append(calendar.initialize())
+    else:
+        logger.info("SCHEDULER_CALENDAR_ENDPOINT not set — skipping Calendar Agent registration")
+
+    await asyncio.gather(*init_tasks)
     logger.info(
         "Sub-agents registered — advisor=%s, calculator=%s, scheduler=%s, calendar=%s",
         advisor.agent_version,
         calculator.agent_id,
         scheduler.agent_id,
-        calendar.agent_id,
+        calendar.agent_id if calendar else "SKIPPED",
     )
 
     # ── Step 2: Register workflow-specific orchestrator ──────────────────────
@@ -151,7 +159,8 @@ async def main() -> None:
     await advisor.close()
     await calculator.close()
     await scheduler.close()
-    await calendar.close()
+    if calendar:
+        await calendar.close()
     await client.close()
     await credential.close()
 

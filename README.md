@@ -112,7 +112,7 @@ azd up
 `azd up` will prompt you for:
 - **Environment name** — e.g. `valc-demo-abc123` (becomes the suffix for all resource names)
 - **Azure subscription** — select from your available subscriptions
-- **Azure region** — select from the curated list (eastus, eastus2, westus3, swedencentral, northcentralus)
+- **Azure region** — select from the curated list (eastus, eastus2, westus, westus3, swedencentral)
 
 This creates the following Azure resources:
 
@@ -121,26 +121,22 @@ This creates the following Azure resources:
 | Resource Group | `rg-{env}` | Container for all resources |
 | AI Services | `ais-{env}` | Foundry + OpenAI models + connections (next-gen) |
 | AI Project | `proj-{env}` | Foundry project (agents live here) |
-| AI Search | `srch-{env}` | Knowledge base index for Advisor Agent |
-| App Service Plan | `plan-{env}` | B1 Linux plan (hosts web app; supports VNet integration) |
-| App Service | `app-{env}` | FastAPI backend + React static frontend |
-| Function App | `func-{env}` | Custom MCP server (calculator + scheduler tools) |
+| AI Search | `srch-{env}` | Knowledge base index + Foundry IQ KB for Advisor Agent |
+| Function App | `func-{env}` | Custom MCP server — Flex Consumption (FC1) |
 | Storage Account | `st{env}` | KB document blobs + Function App runtime |
 | App Insights | `appi-{env}` | Monitoring + diagnostics |
 | Log Analytics | `log-{env}` | Required by App Insights |
 
-Plus 17 RBAC role assignments and 2 RemoteTool project connections — all automated.
+Plus 15 RBAC role assignments and 2 RemoteTool project connections — all automated.
 
 After provisioning completes, `azd up` automatically:
 1. Uploads the 3 knowledge documents to blob storage
-2. Creates an AI Search data source, index, and indexer (pulls from blob → indexes automatically)
-3. Provisions RemoteTool connections for the KB MCP and custom MCP endpoints
-4. Builds the React frontend and copies it to `./static/` for App Service deployment
-5. Deploys the MCP server to the Function App and the backend + UI to the App Service
-6. Pushes hook-set connection names to the App Service as App Settings
-7. Registers all 5 Foundry agents and uploads the workflow definition
-
-After `azd up` completes, the demo is live at `https://app-{env}.azurewebsites.net`.
+2. Creates an AI Search data source, index, skillset, and indexer (blob → embeddings → vector index)
+3. Creates the Foundry IQ Knowledge Base wrapping the search index
+4. Provisions RemoteTool connections for the KB MCP and custom MCP endpoints
+5. Deploys the MCP server to the Function App via `func azure functionapp publish`
+6. Writes `.env` from azd environment values
+7. Registers all 6 Foundry agents and uploads the workflow definition
 
 > **Updating knowledge sources:** To add or update documents, upload new files to the `knowledge-base` blob container and re-run the Search indexer. No redeployment needed.
 
@@ -155,24 +151,14 @@ The Calendar Agent requires a Work IQ Calendar connection, which needs an M365 C
 ```bash
 azd env set SCHEDULER_CALENDAR_ENDPOINT <endpoint-url>
 azd env set SCHEDULER_CALENDAR_CONNECTION <connection-name>
-azd deploy    # re-deploys to pick up the calendar connection
+azd hooks run postprovision    # re-registers agents with calendar connection
 ```
 
 > **Note:** The demo works without the Calendar Agent — the Advisor, Calculator, and Scheduler agents function independently. The calendar step will simply be skipped if this connection is not configured.
 
 ### Run the Demo
 
-After `azd up`, the demo is live at the App Service URL:
-
-```
-https://app-{env}.azurewebsites.net
-```
-
-Select a borrower profile (Marcus, Sarah, or James) and click a demo query button to see the full agent pipeline in action.
-
-#### Local Development (optional)
-
-For local development with hot-reload:
+After `azd up`, run the demo locally:
 
 ```bash
 # Install Python dependencies
@@ -187,6 +173,8 @@ npm install        # first time only
 npm run dev
 # → Open http://localhost:5173
 ```
+
+Select a borrower profile (Marcus, Sarah, or James) and click a demo query button to see the full agent pipeline in action.
 
 ### Tear Down
 
@@ -232,6 +220,7 @@ va-loan-concierge/
 ├── profiles.py                  # DEMO_PROFILES + context injection helpers
 ├── workflow.yaml                # Foundry Workflow Agent definition
 ├── deploy_workflow.py           # Registers sub-agents + uploads workflow
+├── create_kb.py                 # Creates Foundry IQ Knowledge Base via azure-search-documents SDK
 ├── requirements.txt
 │
 ├── infra/                       # Infrastructure-as-code (Bicep)
@@ -246,8 +235,7 @@ va-loan-concierge/
 │   │   ├── monitoring.bicep     # Log Analytics + App Insights
 │   │   └── rbac.bicep           # All role assignments
 │   └── hooks/
-│       ├── postprovision.sh     # Uploads KB docs to blob, creates Search indexer, provisions connections
-│       └── postdeploy.sh        # Writes .env, registers Foundry agents
+│       └── postprovision.ps1    # All post-provision: blob upload, Search index, KB, connections, MCP deploy, .env, agent registration
 │
 ├── agents/
 │   ├── orchestrator_agent.py    # Orchestrator — LLM routing + sub-agent coordination
@@ -409,16 +397,16 @@ Three selectable profiles inject personalized context into every agent query:
 | 1 | Foundry IQ Knowledge Base | Advisor Agent grounded in Azure AI Search KB via MCP (3 knowledge sources, cited responses) |
 | 2 | Azure-Hosted MCP Server | Calculator + Scheduler agents calling tools via custom Azure Function App MCP endpoint |
 | 3 | Workflow Agent | Declarative YAML orchestration deployed to Foundry for Copilot Studio / Teams path |
-| 4 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 12 RBAC assignments, zero manual steps |
+| 4 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 15 RBAC assignments, zero manual steps (except calendar) |
 | — | Human-in-the-Loop | Multi-turn calculator retry loops, appointment confirm/reschedule/decline, workflow parity |
 
 ### Planned
 
 | Phase | Name | Goal | Key Changes |
 |---|---|---|---|
-| **5** | **Web App Deployment** | Deploy to Azure App Service — accessible at a public URL | New `web-app.bicep`, `predeploy.sh` (React build), static file mount in FastAPI, 5 MI role assignments |
+| **5** | **Web App Deployment** | Deploy to Azure App Service (deferred — VM quota blocked) | `web-app.bicep` ready but not wired; demo runs locally for now |
 | **6** | **Observability** | End-to-end tracing in Azure portal + Foundry | OpenTelemetry + Azure Monitor exporter, per-agent trace spans, conversation audit logging, 90-day retention |
 | **7** | **Authentication** | Entra ID Easy Auth — system knows who the user is | App registration via hook, `X-MS-CLIENT-PRINCIPAL` header extraction, Work IQ Calendar delegated auth |
 | **8** | **Network Isolation** | VNet + private endpoints for financial institution compliance | New `network.bicep` (VNet, 3 subnets, NSG, 3 PEs, 3 DNS zones), disable public access on all backend services, Function App moves to shared B1 plan, MI-based storage auth |
 
-Phases are numbered in recommended execution order. Each phase is independently deployable after Phase 5.
+Phase 5 (Web App) is deferred due to subscription VM quota limits. Phases 6-8 can proceed independently once Phase 5 is unblocked. The demo runs locally in the meantime.

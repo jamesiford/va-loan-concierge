@@ -31,9 +31,9 @@ param environmentName string
 @allowed([
   'eastus'
   'eastus2'
+  'westus'
   'westus3'
   'swedencentral'
-  'northcentralus'
 ])
 @description('Azure region — must support Foundry, AI Search, OpenAI, and Functions')
 param location string
@@ -131,26 +131,7 @@ module aiProject 'modules/ai-project.bicep' = {
   }
 }
 
-// ── Level 2: Function App for MCP server ────────────────────────────────────
-
-module webApp 'modules/web-app.bicep' = {
-  name: 'webApp'
-  scope: rg
-  params: {
-    environmentName: environmentName
-    location: location
-    appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
-    foundryProjectEndpoint: aiProject.outputs.projectEndpoint
-    foundryModelDeployment: modelName
-    azureSubscriptionId: subscription().subscriptionId
-    foundryProjectResourceId: aiProject.outputs.projectId
-    advisorSearchEndpoint: search.outputs.searchEndpoint
-    mcpToolsEndpoint: functionApp.outputs.functionAppUrl
-    // Connection names (ADVISOR_MCP_CONNECTION, MCP_TOOLS_CONNECTION, etc.) are
-    // set by the postprovision hook — empty at first provision, pushed to App
-    // Settings by postdeploy hook via `az webapp config appsettings set`.
-  }
-}
+// ── Level 2: Function App (MCP server — Flex Consumption) ────────────────────
 
 module functionApp 'modules/function-app.bicep' = {
   name: 'functionApp'
@@ -177,7 +158,7 @@ module rbac 'modules/rbac.bicep' = {
     storageAccountId: storage.outputs.storageAccountId
     projectId: aiProject.outputs.projectId
     userPrincipalId: principalId
-    webAppPrincipalId: webApp.outputs.webAppPrincipalId
+    functionAppPrincipalId: functionApp.outputs.functionAppPrincipalId
   }
 }
 
@@ -208,7 +189,3 @@ output PROJECT_PRINCIPAL_ID string = aiProject.outputs.projectPrincipalId
 output AI_SERVICES_NAME string = aiServices.outputs.aiServicesName
 output STORAGE_ACCOUNT_NAME string = storage.outputs.storageAccountName
 output KNOWLEDGE_CONTAINER_NAME string = storage.outputs.knowledgeContainerName
-
-// Web App
-output WEB_APP_HOSTNAME string = webApp.outputs.webAppHostname
-output WEB_APP_NAME string = webApp.outputs.webAppName

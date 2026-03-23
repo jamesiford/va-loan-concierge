@@ -19,7 +19,7 @@ param embeddingCapacity int = 30
 param searchId string
 param searchEndpoint string
 
-resource aiServices 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
+resource aiServices 'Microsoft.CognitiveServices/accounts@2025-04-01-preview' = {
   name: 'ais-${environmentName}'
   location: location
   kind: 'AIServices'
@@ -42,7 +42,7 @@ resource aiServices 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
 
 // ── Model deployment ────────────────────────────────────────────────────────
 
-resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
+resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-04-01-preview' = {
   parent: aiServices
   name: modelName
   sku: {
@@ -60,7 +60,7 @@ resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-
 
 // ── Embedding model deployment ─────────────────────────────────────────────
 
-resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
+resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-04-01-preview' = {
   parent: aiServices
   name: embeddingModelName
   sku: {

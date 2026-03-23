@@ -25,7 +25,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   properties: {
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
-    allowSharedKeyAccess: true
+    allowSharedKeyAccess: false
     supportsHttpsTrafficOnly: true
     publicNetworkAccess: 'Enabled'
   }
@@ -40,6 +40,15 @@ resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01
 resource knowledgeContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobServices
   name: 'knowledge-base'
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+// Blob container for Flex Consumption Function App deployment packages
+resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobServices
+  name: 'deploymentpackage'
   properties: {
     publicAccess: 'None'
   }

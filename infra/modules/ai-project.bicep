@@ -8,7 +8,7 @@ param environmentName string
 param location string
 param aiServicesName string
 
-resource aiServices 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
+resource aiServices 'Microsoft.CognitiveServices/accounts@2025-04-01-preview' existing = {
   name: aiServicesName
 }
 
@@ -27,4 +27,4 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2025-04-01-previ
 output projectId string = project.id
 output projectName string = project.name
 output projectPrincipalId string = project.identity.principalId
-output projectEndpoint string = 'https://${aiServices.properties.customSubDomainName}.services.ai.azure.com/'
+output projectEndpoint string = 'https://${aiServices.properties.customSubDomainName}.services.ai.azure.com/api/projects/${project.name}'

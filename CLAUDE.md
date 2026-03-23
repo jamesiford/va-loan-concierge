@@ -396,6 +396,7 @@ va-loan-concierge/
 ├── profiles.py                  # DEMO_PROFILES + _profile_context_block + _demo_context_block
 ├── workflow.yaml                # Foundry Workflow Agent definition (orchestrator → advisor/calculator/scheduler/calendar)
 ├── deploy_workflow.py           # Registers sub-agents + uploads workflow to Foundry
+├── create_kb.py                 # Creates Foundry IQ Knowledge Base (azure-search-documents SDK)
 │
 ├── infra/                       # Infrastructure-as-code (Bicep + azd hooks)
 │   ├── main.bicep               # Orchestrator — wires all modules, defines outputs
@@ -404,13 +405,12 @@ va-loan-concierge/
 │   │   ├── ai-services.bicep    # AI Services account (Foundry + OpenAI + connections)
 │   │   ├── ai-project.bicep     # AI Project (child of AI Services)
 │   │   ├── search.bicep         # AI Search (aadOrApiKey auth, system MI)
-│   │   ├── function-app.bicep   # MCP server Function App
+│   │   ├── function-app.bicep   # MCP server Function App (Flex Consumption FC1)
 │   │   ├── storage.bicep        # Storage (KB blobs + Function App runtime)
 │   │   ├── monitoring.bicep     # Log Analytics + App Insights
-│   │   └── rbac.bicep           # All role assignments (17 total)
+│   │   └── rbac.bicep           # All role assignments (15 total)
 │   └── hooks/
-│       ├── postprovision.sh     # Uploads KB docs to blob, creates Search indexer, provisions connections
-│       └── postdeploy.sh        # Writes .env from azd env, registers Foundry agents
+│       └── postprovision.ps1    # All post-provision: blob upload, Search index/skillset/indexer, Foundry IQ KB, connections, MCP deploy, .env, agent registration
 │
 ├── api/
 │   ├── __init__.py
@@ -842,25 +842,44 @@ agents with a single `azd up` command. `azd down` tears everything down cleanly.
 + child `/projects`), NOT the v1 Hub model (`Microsoft.MachineLearningServices/workspaces`).
 
 **What `azd up` does:**
-1. Bicep provisions: AI Services account, AI Project, AI Search, Function App, Storage,
-   App Insights, Log Analytics — plus 12 RBAC role assignments
-2. `postprovision.sh`: Uploads knowledge docs to blob storage, creates Search data source +
-   index + indexer (blob-backed, re-indexable), provisions RemoteTool connections
-3. `azd deploy`: Deploys MCP server code to Function App
-4. `postdeploy.sh`: Writes `.env` from azd env values, runs `deploy_workflow.py`
+1. Bicep provisions: AI Services account, AI Project, AI Search, Function App (Flex Consumption),
+   Storage, App Insights, Log Analytics — plus 15 RBAC role assignments
+2. `postprovision.ps1` (consolidated PowerShell hook):
+   - Uploads knowledge docs to blob storage
+   - Creates Search data source, index (with vector field), skillset (embedding generation),
+     and indexer (blob → skillset → index)
+   - Provisions RemoteTool connections for KB MCP and custom MCP
+   - Creates Foundry IQ Knowledge Base via `create_kb.py` (wraps search index)
+   - Deploys MCP server to Function App via `func azure functionapp publish --python`
+   - Writes `.env` from azd env values
+   - Registers all Foundry agents via `deploy_workflow.py`
+
+**Implementation details:**
+- Hooks are PowerShell (`.ps1`), using `shell: pwsh` in `azure.yaml` (no separate postdeploy)
+- Function App uses Flex Consumption (FC1), not Y1 Consumption or shared App Service Plan
+- Storage uses `allowSharedKeyAccess: false` and MI-based auth (policy requirement)
+- All API versions use `2025-04-01-preview` for Foundry resources
+- Search API uses `2024-11-01-preview` for data plane calls
+- Foundry IQ Knowledge Base created via `create_kb.py` using `azure-search-documents==11.7.0b2`
+- Separate search token needed: `az account get-access-token --resource https://search.azure.com`
 
 **Naming convention:** `{abbreviation}{environmentName}` — e.g. `ais-valc-demo-abc`,
 `srch-valc-demo-abc`, `func-valc-demo-abc`.
 
-**Region:** User-selectable during `azd up` from curated list (eastus, eastus2, westus3,
-swedencentral, northcentralus).
+**Region:** User-selectable during `azd up` from curated list (eastus, eastus2, westus,
+westus3, swedencentral).
 
 **One manual step:** Work IQ Calendar connection must be configured in Foundry portal
 (requires M365 Copilot license). Demo works without it.
 
 ---
 
-### 5. Web App Deployment (App Service + Static Build) — PLANNED
+### 5. Web App Deployment (App Service + Static Build) — DEFERRED (VM quota)
+
+**Status:** Deferred — subscription-wide App Service VM quota is 0 for all classic tiers
+(Free, Shared, Basic, Standard, Premium). Bicep modules (`web-app.bicep`) are written but
+not wired into `main.bicep`. The demo runs locally for now. Flex Consumption (used by the
+Function App) works because it has separate quota.
 
 **Goal:** Deploy the FastAPI backend + React frontend as an Azure App Service so the demo
 is accessible at a public URL without running locally.
@@ -897,30 +916,9 @@ is accessible at a public URL without running locally.
 - No frontend code changes — Vite production build uses relative paths (`/api/chat`)
   which resolve correctly when served from the same origin.
 
-**New hook: `infra/hooks/predeploy.sh`**
-- `cd ui && npm ci && npm run build`
-- Copy `ui/dist/*` → `./static/` (included in the azd deploy package)
-
-**Modify: `azure.yaml`**
-- Add service `web-app: { host: appservice, language: python, project: ./ }`
-- Add `predeploy` hook reference
-
-**Modify: `infra/hooks/postdeploy.sh`**
-- Add `WEB_APP_HOSTNAME` and `WEB_APP_NAME` to `.env` generation
-
 **Auth note:** `DefaultAzureCredential` on App Service automatically picks up the
 system-assigned managed identity — no code changes needed. The same agent initialization
 code works locally (via `az login`) and in production (via MI).
-
-Items:
-- [ ] Create `infra/modules/web-app.bicep`
-- [ ] Create `infra/hooks/predeploy.sh` (React build + copy to static/)
-- [ ] Modify `infra/main.bicep` — add web-app module, wire outputs
-- [ ] Modify `infra/modules/rbac.bicep` — add 5 Web App MI role assignments
-- [ ] Modify `azure.yaml` — add web-app service + predeploy hook
-- [ ] Modify `api/server.py` — add StaticFiles mount + dynamic CORS
-- [ ] Modify `infra/hooks/postdeploy.sh` — add new env vars
-- [ ] Test: `azd up` → browse `https://app-{env}.azurewebsites.net` → UI loads, query works
 
 ---
 
@@ -993,7 +991,7 @@ Required for Work IQ Calendar (delegated auth) and audit logging.
 provider. No frontend code changes — Easy Auth handles login redirect at the platform
 level; `fetch` calls include the session cookie automatically.
 
-**Modify: `infra/hooks/postprovision.sh`** — add section after existing connection setup:
+**Modify: `infra/hooks/postprovision.ps1`** — add section after existing connection setup:
 - `az ad app create` — Entra app registration with redirect URI
   `https://{WEB_APP_HOSTNAME}/.auth/login/aad/callback`, audience `AzureADMyOrg`
 - `az ad sp create` — service principal for the app
@@ -1023,7 +1021,7 @@ a service account's calendar.
   Administrator` directory role in Entra to create app registrations
 
 Items:
-- [ ] Modify `infra/hooks/postprovision.sh` — add Entra app registration + Easy Auth setup
+- [ ] Modify `infra/hooks/postprovision.ps1` — add Entra app registration + Easy Auth setup
 - [ ] Modify `api/server.py` — add user identity extraction + logging
 - [ ] Document Work IQ Calendar delegated auth manual step
 - [ ] Test: browse → redirect to Microsoft login → authenticate → query works with user logged
@@ -1079,7 +1077,7 @@ B1 App Service Plan created in Phase 5.
 - Function App MI → `Storage Blob Data Owner` on Storage (for Functions runtime)
 - Function App MI → `Storage Queue Data Contributor` on Storage (Functions uses queues)
 
-**Provisioning hook changes (`postprovision.sh`):**
+**Provisioning hook changes (`postprovision.ps1`):**
 Data-plane calls (blob upload, Search index creation) will fail when public access is
 disabled. Solution: if `TRUSTED_IP` is set, add the developer's IP to network rules at
 the start of the hook, perform data-plane operations, then optionally remove.
@@ -1101,7 +1099,7 @@ Items:
 - [ ] Modify `infra/modules/web-app.bicep` — VNet integration + export plan ID
 - [ ] Modify `infra/modules/rbac.bicep` — add Function App MI storage roles
 - [ ] Modify `infra/main.bicep` — wire network module + trustedIp param
-- [ ] Modify `infra/hooks/postprovision.sh` — add trusted IP bypass logic
+- [ ] Modify `infra/hooks/postprovision.ps1` — add trusted IP bypass logic
 - [ ] Test: all private endpoints resolve, public access denied, `azd up` succeeds
 
 ---
@@ -1112,8 +1110,8 @@ Phases are numbered in recommended execution order. Each `azd up` leaves the sys
 fully working. Phases 6, 7, and 8 are independently deployable after Phase 5.
 
 ```
-Phase 5 (Web App)       ← foundation for all others
-    ├── Phase 6 (Observability) — debugging visibility for later phases
-    ├── Phase 7 (Auth)          — simpler to validate on public endpoint
-    └── Phase 8 (Network)       — most complex, do last
+Phase 5 (Web App)       ← DEFERRED (VM quota); demo runs locally
+    ├── Phase 6 (Observability) — can proceed without web app (local + Foundry tracing)
+    ├── Phase 7 (Auth)          — requires Phase 5 (App Service for Easy Auth)
+    └── Phase 8 (Network)       — requires Phase 5 (VNet integration needs App Service)
 ```

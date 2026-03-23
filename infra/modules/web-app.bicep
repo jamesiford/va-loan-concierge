@@ -29,20 +29,8 @@ param mcpToolsConnection string = ''
 param schedulerCalendarEndpoint string = ''
 param schedulerCalendarConnection string = ''
 
-// ── App Service Plan ──────────────────────────────────────────────────────
-
-resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
-  name: 'plan-${environmentName}'
-  location: location
-  kind: 'linux'
-  properties: {
-    reserved: true // required for Linux
-  }
-  sku: {
-    name: 'B1'
-    tier: 'Basic'
-  }
-}
+// ── Shared App Service Plan (from app-service-plan module) ────────────────
+param appServicePlanId string
 
 // ── App Service ───────────────────────────────────────────────────────────
 
@@ -54,7 +42,7 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
     type: 'SystemAssigned'
   }
   properties: {
-    serverFarmId: appServicePlan.id
+    serverFarmId: appServicePlanId
     httpsOnly: true
     publicNetworkAccess: 'Enabled'
     siteConfig: {
@@ -139,4 +127,4 @@ output webAppId string = webApp.id
 output webAppName string = webApp.name
 output webAppPrincipalId string = webApp.identity.principalId
 output webAppHostname string = webApp.properties.defaultHostName
-output appServicePlanId string = appServicePlan.id
+output appServicePlanId string = appServicePlanId

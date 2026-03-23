@@ -18,26 +18,7 @@ infra:
   provider: bicep
   path: infra
 
-services:
-  mcp-server:
-    host: function
-    language: python
-    project: ./mcp-server
-
-  web-app:
-    host: appservice
-    language: python
-    project: ./
-
 hooks:
   postprovision:
-    shell: sh
-    run: infra/hooks/postprovision.sh
-
-  predeploy:
-    shell: sh
-    run: infra/hooks/predeploy.sh
-
-  postdeploy:
-    shell: sh
-    run: infra/hooks/postdeploy.sh
+    shell: pwsh
+    run: infra/hooks/postprovision.ps1
