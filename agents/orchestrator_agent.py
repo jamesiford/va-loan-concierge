@@ -69,10 +69,21 @@ agent(s) to invoke:
       availability, creating calendar events, managing meetings.
 
 When asked to classify a query, respond with ONLY a valid JSON object:
-  {"needs_advisor": <bool>, "needs_calculator": <bool>, "needs_scheduler": <bool>}
+  {"needs_advisor": <bool>, "needs_calculator": <bool>, "needs_scheduler": <bool>, "response": <string>}
 
 Multiple may be true for mixed queries (e.g. "Am I eligible AND show me my savings
-AND book Thursday"). Default needs_advisor to true if the query is ambiguous.
+AND book Thursday").
+
+The "response" field:
+  — When ANY of the three flags is true, set "response" to "".
+  — When ALL three flags are false, the query is general or meta (e.g. "What can
+    you do?", "Hello", "How does this work?"). Write a friendly, concise answer
+    describing your three capabilities: (1) answering VA loan eligibility and
+    guideline questions, (2) calculating refinance savings, and (3) scheduling
+    appointments with a loan officer. Invite the Veteran to ask a specific question.
+
+Do NOT default to needs_advisor for general/meta queries. Only set needs_advisor
+to true when the Veteran is asking a substantive VA loan question.
 """
 
 # ---------------------------------------------------------------------------
@@ -98,18 +109,31 @@ _SCHEDULER_KEYWORDS: frozenset[str] = frozenset({
 })
 
 
-def _classify_hint(query: str) -> tuple[bool, bool, bool]:
+_GENERAL_RESPONSE = (
+    "I'm your VA Loan Concierge! Here's what I can help you with:\n\n"
+    "1. **VA Loan Guidance** — I can answer questions about eligibility, IRRRL "
+    "qualification, entitlement, funding fees, and the loan process, all grounded "
+    "in official VA guidelines and lender products.\n\n"
+    "2. **Refinance Savings** — I can calculate your monthly savings, break-even "
+    "timeline, and closing costs if you're considering a refinance.\n\n"
+    "3. **Appointment Scheduling** — I can book a consultation with a loan officer "
+    "and add it to your calendar.\n\n"
+    "What would you like to know?"
+)
+
+
+def _classify_hint(query: str) -> tuple[bool, bool, bool, str]:
     """
     Keyword-based pre-classification for routing decisions.
-    Defaults to advisor-only if no keywords match.
+    Returns general capabilities response when no keywords match.
     """
     q = query.lower()
     needs_advisor = any(kw in q for kw in _ADVISOR_KEYWORDS)
     needs_calculator = any(kw in q for kw in _CALCULATOR_KEYWORDS)
     needs_scheduler = any(kw in q for kw in _SCHEDULER_KEYWORDS)
     if not needs_advisor and not needs_calculator and not needs_scheduler:
-        needs_advisor = True
-    return needs_advisor, needs_calculator, needs_scheduler
+        return False, False, False, _GENERAL_RESPONSE
+    return needs_advisor, needs_calculator, needs_scheduler, ""
 
 
 def _route_label(needs_advisor: bool, needs_calculator: bool, needs_scheduler: bool) -> str:
@@ -120,7 +144,7 @@ def _route_label(needs_advisor: bool, needs_calculator: bool, needs_scheduler: b
         agents.append("Calculator Agent")
     if needs_scheduler:
         agents.append("Scheduler Agent")
-    return " + ".join(agents) if agents else "Advisor Agent"
+    return " + ".join(agents) if agents else "Concierge (general)"
 
 
 # ---------------------------------------------------------------------------
@@ -205,13 +229,16 @@ class Orchestrator:
             self._orchestrator_version,
         )
 
-    async def _llm_classify(self, query: str) -> tuple[bool, bool, bool]:
+    async def _llm_classify(self, query: str) -> tuple[bool, bool, bool, str]:
         """
         Use the orchestrator Foundry agent to classify routing via LLM inference.
 
-        Calls the Responses API with a structured classification prompt and
-        parses the JSON routing decision. Falls back to keyword classification
-        if the LLM call fails or returns unparseable output.
+        Returns (needs_advisor, needs_calculator, needs_scheduler, response).
+        When all three flags are false, ``response`` contains a general
+        capabilities message from the LLM. Otherwise ``response`` is "".
+
+        Falls back to keyword classification if the LLM call fails or returns
+        unparseable output.
         """
         if not self._orchestrator_version:
             logger.debug("orchestrator: no version set — using keyword fallback")
@@ -223,8 +250,8 @@ class Orchestrator:
 
         classify_prompt = (
             "Classify the following Veteran's query. Respond with ONLY a JSON object "
-            "with three boolean fields — needs_advisor, needs_calculator, and "
-            "needs_scheduler — and nothing else.\n\n"
+            "with four fields — needs_advisor (bool), needs_calculator (bool), "
+            "needs_scheduler (bool), and response (string) — and nothing else.\n\n"
             f'Query: "{query}"'
         )
 
@@ -247,16 +274,18 @@ class Orchestrator:
                 if text.startswith("json"):
                     text = text[4:]
             data = json.loads(text)
-            needs_advisor = bool(data.get("needs_advisor", True))
+            needs_advisor = bool(data.get("needs_advisor", False))
             needs_calculator = bool(data.get("needs_calculator", False))
             needs_scheduler = bool(data.get("needs_scheduler", False))
+            general_response = str(data.get("response", ""))
             logger.info(
-                "orchestrator: LLM routing — needs_advisor=%s  needs_calculator=%s  needs_scheduler=%s",
+                "orchestrator: LLM routing — needs_advisor=%s  needs_calculator=%s  needs_scheduler=%s  has_response=%s",
                 needs_advisor,
                 needs_calculator,
                 needs_scheduler,
+                bool(general_response),
             )
-            return needs_advisor, needs_calculator, needs_scheduler
+            return needs_advisor, needs_calculator, needs_scheduler, general_response
         except Exception as exc:
             logger.warning(
                 "orchestrator: LLM classification failed, falling back to keywords: %s", exc
@@ -380,7 +409,9 @@ class Orchestrator:
         yield {"type": "orchestrator_start", "message": "Analyzing your query..."}
         await asyncio.sleep(0.15)
 
-        needs_advisor, needs_calculator, needs_scheduler = await self._llm_classify(query)
+        needs_advisor, needs_calculator, needs_scheduler, general_response = (
+            await self._llm_classify(query)
+        )
         state.needs_advisor = needs_advisor
         state.needs_calculator = needs_calculator
         state.needs_scheduler = needs_scheduler
@@ -389,6 +420,18 @@ class Orchestrator:
             "type": "orchestrator_route",
             "message": f"Routing to: {route_label}",
         }
+
+        # ── General / meta query — respond directly, no sub-agents ─────
+        if not needs_advisor and not needs_calculator and not needs_scheduler:
+            response_text = general_response or _GENERAL_RESPONSE
+            yield {
+                "type": "partial_response",
+                "agent": "orchestrator",
+                "label": "VA Loan Concierge",
+                "content": response_text,
+            }
+            yield {"type": "complete", "message": "Response ready"}
+            return
 
         # Build the plan chain for the chat thread.
         plan_agents = []

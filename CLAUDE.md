@@ -154,13 +154,18 @@ emits an `await_input` SSE event with `conversation_id` for resumption.
 
 **Appointment Confirmation HIL** (after scheduler books an appointment):
 1. Orchestrator pauses: "Does this appointment work for you?"
-2. 3-way classification (LLM with keyword fallback):
-   - **Confirm** (default) → Calendar Agent creates M365 event
+2. 4-way classification (LLM with keyword fallback):
+   - **Confirm** → Calendar Agent creates M365 event (requires explicit positive keywords)
    - **Reschedule** → Scheduler re-runs with new preference, loops back to confirmation
    - **Decline** → Calendar step skipped, appointment still confirmed
-3. Reschedule keywords (16): `instead`, `change`, `different`, `reschedule`, `another`,
+   - **Unrecognized** (default) → moves on without calendar event, appointment still confirmed
+3. Confirm keywords (12): `yes`, `confirm`, `looks good`, `perfect`, `great`, `add it`,
+   `add to`, `calendar`, `book it`, `works for me`, `sounds good`, `that works`
+4. Reschedule keywords (16): `instead`, `change`, `different`, `reschedule`, `another`,
    `monday`–`saturday`, `morning`, `afternoon`, `earlier`, `later`
-4. Decline keywords (7): `no`, `skip`, `don't`, `cancel`, `decline`, `not now`, `no thanks`
+5. Decline keywords (6): `no thank`, `skip`, `don't`, `cancel`, `decline`, `not now`
+6. Note: In the Python orchestrator, confirm is the default (LLM classifies); in the
+   workflow YAML, unrecognized input defaults to "move on" (safer without LLM fallback)
 
 **ConversationState** (`api/conversation_state.py`):
 - `pending_action`: `None` | `"awaiting_profile_info"` | `"awaiting_calculator_retry"`
@@ -666,11 +671,14 @@ sub-agents (advisor, calculator, scheduler, calendar) run, SSE events stream to 
 in real time, and per-agent partial responses render correctly with real KB grounding
 and citations. Multi-turn HIL flows (calculator loan details collection, appointment
 confirmation/reschedule/decline) work in both the Python orchestrator and the Foundry
-Workflow Agent.
+Workflow Agent. The workflow YAML has been hardened (simplified from 740 to ~289 lines,
+Power Fx fixes, conversationId isolation, graceful HIL fallbacks) and validated in the
+Foundry playground.
 
-**Completed:** Phases 0–4 (agents, MCP, Foundry IQ, workflow agent, IaC) + HIL orchestration.
-**Next:** Phases 5–8 bring production readiness — deployed web app, observability,
-authentication, and network isolation (numbered in recommended execution order).
+**Completed:** Phases 0–4 (agents, MCP, Foundry IQ, workflow agent, IaC) + HIL orchestration
++ workflow hardening (2026-03-24).
+**Next:** Copilot Studio / Teams publishing. Phases 5–8 bring production readiness —
+deployed web app, observability, authentication, and network isolation.
 
 ---
 
@@ -760,7 +768,7 @@ directly using a standard `FunctionApp` HTTP trigger instead.
 
 ---
 
-### 3. Foundry Workflow Agent + Copilot Studio / Teams — ✅ WORKFLOW DEPLOYED
+### 3. Foundry Workflow Agent + Copilot Studio / Teams — ✅ WORKFLOW HARDENED
 
 **Target surfaces:** M365 Copilot (Work) and Microsoft Teams via Copilot Studio native
 Foundry connector.
@@ -784,7 +792,8 @@ hosted agents. Private networking is also supported (hosted agents do not suppor
 preview).
 
 **Why not ConnectedAgentTool / A2APreviewTool:**
-- `ConnectedAgentTool` — classic 1.x SDK only; does not exist in `azure-ai-projects` 2.x
+- `ConnectedAgentTool` — available in `azure.ai.agents.models` 2.x SDK, but user prefers
+  declarative workflow for Foundry-native orchestration
 - `A2APreviewTool` — requires each sub-agent to be separately deployed as an A2A-protocol
   HTTP server. Foundry agents are A2A *clients*, not servers. Adds infrastructure with no
   benefit.
@@ -808,11 +817,46 @@ preview).
 - [x] Add HIL patterns: calculator loan details collection (with retry loop + skip),
   appointment confirmation (confirm/reschedule/decline with GotoAction loops)
 - [x] Parity audit: workflow YAML matches Python orchestrator logic (keywords, flow
-  structure, default-to-confirm, reschedule enrichment context)
+  structure, reschedule enrichment context)
 - Note: requires preview header `Foundry-Features: WorkflowAgents=V1Preview` (injected via
   custom `SansIOHTTPPolicy` in `deploy_workflow.py`)
 - Note: Foundry workflow `kind: Question` nodes require `prompt` (not `question.text`)
   and `entity: StringPrebuiltEntity` for free-text input
+
+**Phase 2 — Workflow Hardening** ✅ COMPLETE (2026-03-24)
+- [x] Simplified workflow from 740 lines (7 combinatorial branches) to ~289 lines
+  (4 sequential ConditionGroups — advisor, calculator, scheduler, general)
+- [x] Fixed Power Fx syntax: `"keyword" in Lower(var)` not `Contains()` (unsupported)
+- [x] Fixed `SendActivity.activity` — does not evaluate Power Fx; uses static strings
+- [x] Added `Local.EarlyExit` flag — "done" keywords at any HIL pause skip remaining agents
+- [x] Added `Local.OriginalText` — preserves user query for scheduler (LatestMessage gets
+  overwritten by advisor/calculator outputs)
+- [x] Removed all `conversationId` from `InvokeAzureAgent` nodes — each agent gets fresh
+  context per invocation (prevents conversation history buildup that confused routing
+  and prevented scheduler MCP tool execution)
+- [x] Added general/meta query handling — orchestrator answers capabilities questions
+  directly without invoking sub-agents (4th `response` field in routing JSON)
+- [x] Added graceful HIL fallbacks — unrecognized input at any pause point gets
+  "I didn't quite understand that, but no problem — we'll keep moving"
+- [x] Flipped scheduler confirmation default — explicit confirm keywords required for
+  calendar creation; unrecognized input moves on safely without creating events
+- [x] Updated `deploy_workflow.py` orchestrator instructions to match
+- [x] Updated Python orchestrator (`orchestrator_agent.py`) for parity (general query
+  handling, 4-tuple classification)
+- [x] All 111 tests passing
+
+**Workflow YAML key patterns:**
+- **No `conversationId`** on any `InvokeAzureAgent` node — each invocation gets a fresh
+  Foundry conversation. Context is passed via enriched input messages (`Concatenate`).
+  This is critical: `conversationId: =System.ConversationId` causes history buildup
+  across workflow runs in the same session; `Concatenate(...)` suffixes cause "Malformed
+  identifier" errors.
+- **`Local.OriginalText`** saved at workflow start — `Local.LatestMessage` gets overwritten
+  by each agent's output, so the scheduler needs the original to extract day/time.
+- **Power Fx `in` operator** for string containment — NOT `Contains()` function.
+- **`SendActivity.activity`** only accepts literal strings — no expression evaluation.
+- **`elseActions` must be safe** — default paths should never trigger side effects
+  (e.g., creating calendar events for confused input).
 
 **Backlog — Copilot Studio + Teams**
 Initial attempt completed (Bot Service created, agent published, appeared in M365 Copilot)

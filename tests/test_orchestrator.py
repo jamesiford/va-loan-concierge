@@ -25,7 +25,7 @@ from profiles import _demo_context_block
 
 def _patch_llm_classify(orch: Orchestrator) -> None:
     """Replace _llm_classify with a keyword-based stub for testing."""
-    async def _stub(query: str) -> tuple[bool, bool, bool]:
+    async def _stub(query: str) -> tuple[bool, bool, bool, str]:
         return _classify_hint(query)
     orch._llm_classify = _stub
 
@@ -36,23 +36,25 @@ def _patch_llm_classify(orch: Orchestrator) -> None:
 
 class TestClassifyHint:
     def test_irrrl_eligibility_query_is_advisor_only(self):
-        advisor, calculator, scheduler = _classify_hint("Am I eligible for an IRRRL?")
+        advisor, calculator, scheduler, response = _classify_hint("Am I eligible for an IRRRL?")
         assert advisor is True
         assert calculator is False
         assert scheduler is False
+        assert response == ""
 
     def test_second_time_query_is_advisor_only(self):
-        advisor, calculator, scheduler = _classify_hint("Can I use my VA loan a second time?")
+        advisor, calculator, scheduler, response = _classify_hint("Can I use my VA loan a second time?")
         assert advisor is True
         assert calculator is False
         assert scheduler is False
+        assert response == ""
 
     def test_schedule_query_is_scheduler(self):
-        advisor, calculator, scheduler = _classify_hint("Book a call for Thursday")
+        advisor, calculator, scheduler, response = _classify_hint("Book a call for Thursday")
         assert scheduler is True
 
     def test_calculation_query_is_calculator(self):
-        advisor, calculator, scheduler = _classify_hint("How much would I save by refinancing?")
+        advisor, calculator, scheduler, response = _classify_hint("How much would I save by refinancing?")
         assert calculator is True
 
     def test_flagship_mixed_query_triggers_all(self):
@@ -60,16 +62,19 @@ class TestClassifyHint:
             "I'm thinking about refinancing my VA loan. Am I eligible for an IRRRL, "
             "and can you show me what I'd save and schedule a call for Thursday?"
         )
-        advisor, calculator, scheduler = _classify_hint(query)
+        advisor, calculator, scheduler, response = _classify_hint(query)
         assert advisor is True
         assert calculator is True
         assert scheduler is True
+        assert response == ""
 
-    def test_unknown_query_defaults_to_advisor(self):
-        advisor, calculator, scheduler = _classify_hint("Hello there")
-        assert advisor is True
+    def test_general_query_returns_capabilities(self):
+        advisor, calculator, scheduler, response = _classify_hint("Hello there")
+        assert advisor is False
         assert calculator is False
         assert scheduler is False
+        assert "VA Loan Concierge" in response
+        assert len(response) > 0
 
     def test_route_label_all(self):
         assert _route_label(True, True, True) == "Advisor Agent + Calculator Agent + Scheduler Agent"
@@ -85,6 +90,9 @@ class TestClassifyHint:
 
     def test_route_label_calculator_scheduler(self):
         assert _route_label(False, True, True) == "Calculator Agent + Scheduler Agent"
+
+    def test_route_label_general(self):
+        assert _route_label(False, False, False) == "Concierge (general)"
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +205,26 @@ async def collect_events(orch: Orchestrator, query: str, profile_id: str | None 
 
 
 class TestOrchestratorRun:
+    async def test_general_query_returns_capabilities_without_sub_agents(self):
+        """A meta query like 'Hello' should get a direct response, no sub-agents."""
+        orch = _make_orchestrator_with_mocks()
+        events = await collect_events(orch, "Hello, what can you do?")
+        types = [e["type"] for e in events]
+        # Should have orchestrator_start, orchestrator_route, partial_response, complete
+        assert "orchestrator_start" in types
+        assert "orchestrator_route" in types
+        assert "partial_response" in types
+        assert "complete" in types
+        # Should NOT route to any sub-agents
+        assert "advisor_start" not in types
+        assert "calculator_start" not in types
+        assert "scheduler_start" not in types
+        assert "plan" not in types
+        # The partial_response should be from the orchestrator, not a sub-agent
+        partial = next(e for e in events if e["type"] == "partial_response")
+        assert partial["agent"] == "orchestrator"
+        assert "VA Loan Concierge" in partial["content"]
+
     async def test_orchestrator_start_is_first_event(self):
         orch = _make_orchestrator_with_mocks()
         events = await collect_events(orch, "Am I eligible for an IRRRL?")
@@ -380,7 +408,7 @@ class TestLlmClassify:
         orch = self._make_orch_with_responses(
             '{"needs_advisor": true, "needs_calculator": false, "needs_scheduler": false}'
         )
-        advisor, calculator, scheduler = await orch._llm_classify("Am I eligible for an IRRRL?")
+        advisor, calculator, scheduler, _response = await orch._llm_classify("Am I eligible for an IRRRL?")
         assert advisor is True
         assert calculator is False
         assert scheduler is False
@@ -389,7 +417,7 @@ class TestLlmClassify:
         orch = self._make_orch_with_responses(
             '{"needs_advisor": false, "needs_calculator": true, "needs_scheduler": false}'
         )
-        advisor, calculator, scheduler = await orch._llm_classify("Show me my savings")
+        advisor, calculator, scheduler, _response = await orch._llm_classify("Show me my savings")
         assert advisor is False
         assert calculator is True
         assert scheduler is False
@@ -398,7 +426,7 @@ class TestLlmClassify:
         orch = self._make_orch_with_responses(
             '{"needs_advisor": false, "needs_calculator": false, "needs_scheduler": true}'
         )
-        advisor, calculator, scheduler = await orch._llm_classify("Book a call for Thursday")
+        advisor, calculator, scheduler, _response = await orch._llm_classify("Book a call for Thursday")
         assert advisor is False
         assert calculator is False
         assert scheduler is True
@@ -407,7 +435,7 @@ class TestLlmClassify:
         orch = self._make_orch_with_responses(
             '{"needs_advisor": true, "needs_calculator": true, "needs_scheduler": true}'
         )
-        advisor, calculator, scheduler = await orch._llm_classify("Flagship query")
+        advisor, calculator, scheduler, _response = await orch._llm_classify("Flagship query")
         assert advisor is True
         assert calculator is True
         assert scheduler is True
@@ -416,7 +444,7 @@ class TestLlmClassify:
         orch = self._make_orch_with_responses(
             '```json\n{"needs_advisor": true, "needs_calculator": true, "needs_scheduler": false}\n```'
         )
-        advisor, calculator, scheduler = await orch._llm_classify("Flagship query")
+        advisor, calculator, scheduler, _response = await orch._llm_classify("Flagship query")
         assert advisor is True
         assert calculator is True
 
@@ -430,14 +458,14 @@ class TestLlmClassify:
         mock_client.get_openai_client = MagicMock(return_value=openai_client)
         orch._get_client = lambda: mock_client
 
-        advisor, calculator, scheduler = await orch._llm_classify("Am I eligible for an IRRRL?")
+        advisor, calculator, scheduler, _response = await orch._llm_classify("Am I eligible for an IRRRL?")
         assert advisor is True
         assert calculator is False
 
     async def test_no_version_uses_keyword_fallback(self):
         orch = Orchestrator()
         assert orch._orchestrator_version is None
-        advisor, calculator, scheduler = await orch._llm_classify("Book a call for Thursday")
+        advisor, calculator, scheduler, _response = await orch._llm_classify("Book a call for Thursday")
         assert scheduler is True
 
 

@@ -243,7 +243,7 @@ python main.py --query "Can I use my VA loan benefit a second time?"
 ## Running Tests
 
 ```bash
-pytest tests/     # 109 tests — all agents mocked, no Azure calls needed
+pytest tests/     # 111 tests — all agents mocked, no Azure calls needed
 ```
 
 ---
@@ -356,11 +356,12 @@ When no borrower profile is loaded and the calculator is needed, the orchestrato
 
 **Appointment Confirmation HIL:**
 After the Scheduler books an appointment, the orchestrator pauses for confirmation. The user can:
-- **Confirm** (default) — Calendar Agent creates an M365 calendar event
+- **Confirm** — Calendar Agent creates an M365 calendar event
 - **Reschedule** — Scheduler re-runs with the new preference, then asks again
 - **Decline** — Calendar step skipped, appointment still confirmed
+- **Unrecognized input** — moves on gracefully without creating a calendar event
 
-Both HIL patterns work in the Python orchestrator (React UI) and the Foundry Workflow Agent (Copilot Studio / Teams), using `GotoAction` loops and `ConditionGroup` branching in the declarative YAML.
+Both HIL patterns work in the Python orchestrator (React UI) and the Foundry Workflow Agent (Copilot Studio / Teams), using `GotoAction` loops and `ConditionGroup` branching in the declarative YAML. All HIL pause points include graceful fallbacks for unrecognized input.
 
 ### Work IQ Calendar — M365 Integration (Calendar Agent)
 
@@ -390,7 +391,7 @@ Three selectable profiles inject personalized context into every agent query:
 | Auth | `azure-identity` (`DefaultAzureCredential`) |
 | MCP server | Azure Functions v2 (plain HTTP trigger) |
 | Infrastructure | Bicep + Azure Developer CLI (`azd`) |
-| Tests | `pytest` — 109 tests across all agents |
+| Tests | `pytest` — 111 tests across all agents |
 
 ### Frontend
 
@@ -419,7 +420,7 @@ Three selectable profiles inject personalized context into every agent query:
 | Human-in-the-loop | Multi-turn conversations with calculator retry loops and appointment confirmation |
 | Profile-aware responses | Borrower context injected per-query; calculator uses real loan parameters |
 | Governed, citable AI | Every factual claim traces back to a specific knowledge document |
-| Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams (with HIL parity) |
+| Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams — hardened with HIL parity, graceful fallbacks, and isolated agent contexts |
 
 ---
 
@@ -435,6 +436,7 @@ Three selectable profiles inject personalized context into every agent query:
 | 3 | Workflow Agent | Declarative YAML orchestration deployed to Foundry for Copilot Studio / Teams path |
 | 4 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 15 RBAC assignments; two manual portal steps (KB + calendar) |
 | — | Human-in-the-Loop | Multi-turn calculator retry loops, appointment confirm/reschedule/decline, workflow parity |
+| — | Workflow Hardening | Simplified 740→289 lines, Power Fx fixes, conversationId isolation, general query handling, graceful HIL fallbacks |
 
 ### Planned
 
