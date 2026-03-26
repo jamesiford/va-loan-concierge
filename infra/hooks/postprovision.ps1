@@ -5,9 +5,10 @@
 #   1. Upload knowledge docs to blob storage
 #   2. Create AI Search data source, index, skillset, and indexer (blob → embeddings → vector index)
 #   3. Create RemoteTool project connections (KB MCP + custom MCP)
-#   4. Deploy MCP server Function App
-#   5. Write .env from azd env values
-#   6. Register Foundry agents
+#   4. Create Foundry guardrail policies (per-agent safety controls)
+#   5. Deploy MCP server Function App
+#   6. Write .env from azd env values
+#   7. Register Foundry agents
 #
 # NOTE: Foundry IQ Knowledge Base creation is a MANUAL step after deployment.
 #       See README.md for instructions.
@@ -286,13 +287,94 @@ try {
     Write-Host "  MCP tools connection: HTTP $($_.Exception.Response.StatusCode.value__) - $($_.ErrorDetails.Message)"
 }
 
-# -- 8. Save connection names to azd env for use by app --
+# -- 8. Create Foundry Guardrails (per-agent safety policies) --
+# Two custom raiPolicy resources: one for advisor, one for calculator+scheduler.
+# Idempotent PUT — safe to rerun. Assignment to agents is a manual portal step.
+
+$GUARDRAIL_API_VERSION = "2025-04-01-preview"
+$GUARDRAIL_BASE_URI = "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.CognitiveServices/accounts/${AI_SERVICES_NAME}"
+
+Write-Host ""
+Write-Host "=== Creating Foundry guardrail policies ==="
+
+# 8a. Advisor Guardrail (user input + output)
+Write-Host "Creating guardrail: va-loan-advisor-guardrail"
+
+$advisorGuardrail = @{
+    properties = @{
+        mode = "Default"
+        basePolicyName = "Microsoft.DefaultV2"
+        contentFilters = @(
+            # Prompt filters
+            @{ name = "Violence"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Hate"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Sexual"; severityThreshold = "Medium"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Selfharm"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Jailbreak"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Indirect Attack"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Profanity"; blocking = $true; enabled = $true; source = "Prompt" }
+            # Completion filters
+            @{ name = "Violence"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Hate"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Sexual"; severityThreshold = "Medium"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Selfharm"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Protected Material Text"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Protected Material Code"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Profanity"; blocking = $true; enabled = $true; source = "Completion" }
+        )
+    }
+} | ConvertTo-Json -Depth 10
+
+try {
+    $resp = Invoke-WebRequest -Uri "${GUARDRAIL_BASE_URI}/raiPolicies/va-loan-advisor-guardrail?api-version=${GUARDRAIL_API_VERSION}" `
+        -Method PUT -Headers $armHeaders -Body $advisorGuardrail -UseBasicParsing
+    Write-Host "  Advisor guardrail: HTTP $($resp.StatusCode)"
+} catch {
+    Write-Host "  Advisor guardrail: HTTP $($_.Exception.Response.StatusCode.value__) - $($_.ErrorDetails.Message)"
+}
+
+# 8b. Tools Guardrail (user input + tool call + tool response + output)
+Write-Host "Creating guardrail: va-loan-tools-guardrail"
+
+$toolsGuardrail = @{
+    properties = @{
+        mode = "Default"
+        basePolicyName = "Microsoft.DefaultV2"
+        contentFilters = @(
+            # Prompt filters
+            @{ name = "Violence"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Hate"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Sexual"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Selfharm"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Jailbreak"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Indirect Attack"; blocking = $true; enabled = $true; source = "Prompt" }
+            @{ name = "Profanity"; blocking = $true; enabled = $true; source = "Prompt" }
+            # Completion filters
+            @{ name = "Violence"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Hate"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Sexual"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Selfharm"; severityThreshold = "Low"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Protected Material Text"; blocking = $true; enabled = $true; source = "Completion" }
+            @{ name = "Profanity"; blocking = $true; enabled = $true; source = "Completion" }
+        )
+    }
+} | ConvertTo-Json -Depth 10
+
+try {
+    $resp = Invoke-WebRequest -Uri "${GUARDRAIL_BASE_URI}/raiPolicies/va-loan-tools-guardrail?api-version=${GUARDRAIL_API_VERSION}" `
+        -Method PUT -Headers $armHeaders -Body $toolsGuardrail -UseBasicParsing
+    Write-Host "  Tools guardrail: HTTP $($resp.StatusCode)"
+} catch {
+    Write-Host "  Tools guardrail: HTTP $($_.Exception.Response.StatusCode.value__) - $($_.ErrorDetails.Message)"
+}
+
+# -- 9. Save connection names to azd env for use by app --
 
 azd env set ADVISOR_KNOWLEDGE_BASE_NAME $KB_NAME
 azd env set ADVISOR_MCP_CONNECTION $ADVISOR_MCP_CONNECTION
 azd env set MCP_TOOLS_CONNECTION $MCP_TOOLS_CONNECTION
 
-# -- 9. Deploy MCP server Function App --
+# -- 10. Deploy MCP server Function App --
 # azd service deploy uses storage account keys which are blocked by policy.
 # Deploy via az CLI instead (uses Azure AD auth).
 
@@ -310,7 +392,7 @@ if ($FUNC_APP_NAME -and $AZURE_RESOURCE_GROUP) {
     Write-Host "  WARNING: FUNCTION_APP_NAME or AZURE_RESOURCE_GROUP not set, skipping MCP deploy"
 }
 
-# -- 10. Write .env from azd env values --
+# -- 11. Write .env from azd env values --
 
 Write-Host ""
 Write-Host "=== Writing .env from azd environment ==="
@@ -343,7 +425,7 @@ if ($CALENDAR_ENDPOINT -and $CALENDAR_ENDPOINT -notmatch "^ERROR:") {
 
 Write-Host "  .env written"
 
-# -- 11. Register Foundry agents --
+# -- 12. Register Foundry agents --
 
 Write-Host ""
 Write-Host "=== Registering Foundry agents ==="
@@ -357,7 +439,15 @@ Write-Host ""
 Write-Host "  1. Create Foundry IQ Knowledge Base in the Foundry portal"
 Write-Host "     (wraps the search index that was just created)"
 Write-Host ""
-Write-Host "  2. (Optional) Configure Work IQ Calendar connection"
+Write-Host "  2. Assign guardrails to agents in the Foundry portal:"
+Write-Host "     Build > Agents > va-loan-advisor-iq > Guardrails > Manage"
+Write-Host "       -> Assign 'va-loan-advisor-guardrail'"
+Write-Host "     Build > Agents > va-loan-calculator-mcp > Guardrails > Manage"
+Write-Host "       -> Assign 'va-loan-tools-guardrail'"
+Write-Host "     Build > Agents > va-loan-scheduler-mcp > Guardrails > Manage"
+Write-Host "       -> Assign 'va-loan-tools-guardrail'"
+Write-Host ""
+Write-Host "  3. (Optional) Configure Work IQ Calendar connection"
 Write-Host "     for M365 calendar integration"
 Write-Host ""
 Write-Host "  After completing manual steps, run locally:"
