@@ -191,7 +191,17 @@ azd env set SCHEDULER_CALENDAR_CONNECTION <connection-name>
 azd hooks run postprovision    # re-writes .env and re-registers agents with calendar connection
 ```
 
-> **Note:** The demo works without either manual step partially configured — the Advisor Agent needs the KB to answer questions, but the Calculator and Scheduler agents function independently. The Calendar Agent step is skipped if the Work IQ Calendar connection is not configured.
+### Manual Step 3: Assign Guardrails to Agents (Recommended)
+
+`azd up` creates two guardrail policies (`va-loan-advisor-guardrail` and `va-loan-tools-guardrail`) but they must be assigned to agents in the portal:
+
+1. Open the Foundry portal → your project → **Build > Agents**
+2. Select `va-loan-advisor-iq` → **Guardrails** → **Manage** → assign `va-loan-advisor-guardrail`
+3. Repeat for `va-loan-calculator-mcp` and `va-loan-scheduler-mcp` → assign `va-loan-tools-guardrail`
+
+This enables per-agent content safety controls including jailbreak detection, PII detection, and tool call scanning.
+
+> **Note:** The demo works without the manual steps partially configured — the Advisor Agent needs the KB to answer questions, but the Calculator and Scheduler agents function independently. The Calendar Agent step is skipped if the Work IQ Calendar connection is not configured. Guardrails add safety controls but agents function without them.
 
 ### Run the Demo
 
@@ -248,6 +258,22 @@ pytest tests/     # 111 tests — all agents mocked, no Azure calls needed
 
 ---
 
+## Running Evaluations
+
+Agent evaluations run server-side via the OpenAI Evals API. Queries are sent directly to your registered Foundry agents, evaluated by builtin evaluators, and results appear in the Foundry portal under **Build > Evaluations**.
+
+```bash
+az login
+python evals/run_eval.py                       # advisor eval (task adherence, groundedness, coherence, relevance)
+python evals/run_eval.py --agent orchestrator  # orchestrator eval (task adherence, coherence)
+python evals/run_eval.py --all                 # both
+python evals/run_eval.py --cleanup             # delete old evals + files
+```
+
+The script polls for completion and prints a portal URL linking directly to the results.
+
+---
+
 ## Project Structure
 
 ```
@@ -289,6 +315,14 @@ va-loan-concierge/
 │   ├── server.py                # Tool implementations + inputSchema definitions
 │   ├── host.json                # routePrefix: "" → endpoint at /mcp
 │   └── requirements.txt
+│
+├── evals/                       # Agent evaluation datasets and runner
+│   ├── eval_advisor.jsonl       # 15 test queries for Advisor Agent
+│   ├── eval_orchestrator.jsonl  # 10 test queries for Orchestrator routing
+│   └── run_eval.py              # OpenAI Evals API runner (server-side)
+│
+├── scripts/
+│   └── create_guardrails.ps1    # Standalone guardrail policy creation
 │
 ├── knowledge/                   # Knowledge base source documents
 │   ├── va_guidelines.md         # VA eligibility rules, IRRRL, funding fees
@@ -422,7 +456,7 @@ Three selectable profiles inject personalized context into every agent query:
 | Governed, citable AI | Every factual claim traces back to a specific knowledge document |
 | Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams — hardened with HIL parity, graceful fallbacks, and isolated agent contexts |
 | Guardrails & content safety | Four defense layers: per-agent Foundry guardrails (tool call + PII scanning), content filter IaC, agent instruction rules, MCP input validation |
-| Agent evaluations | Foundry Evals API targeting registered agents — task adherence, groundedness, coherence, relevance, violence evaluators with JSONL datasets |
+| Agent evaluations | OpenAI Evals API targeting registered agents server-side — task adherence, groundedness, coherence, relevance; results visible in Foundry portal (Build > Evaluations) |
 
 ---
 
@@ -432,23 +466,22 @@ Three selectable profiles inject personalized context into every agent query:
 
 | Phase | Name | What It Does |
 |---|---|---|
-| 0 | Foundation | Refactored orchestrator, profiles, CLI entry point |
-| 1 | Foundry IQ Knowledge Base | Advisor Agent grounded in Azure AI Search KB via MCP (3 knowledge sources, cited responses) |
-| 2 | Azure-Hosted MCP Server | Calculator + Scheduler agents calling tools via custom Azure Function App MCP endpoint |
-| 3 | Workflow Agent | Declarative YAML orchestration deployed to Foundry for Copilot Studio / Teams path |
-| 4 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 15 RBAC assignments; two manual portal steps (KB + calendar) |
-| — | Human-in-the-Loop | Multi-turn calculator retry loops, appointment confirm/reschedule/decline, workflow parity |
-| — | Workflow Hardening | Simplified 740→289 lines, Power Fx fixes, conversationId isolation, general query handling, graceful HIL fallbacks |
-| — | Guardrails & Content Safety | Four defense layers: Foundry guardrails (per-agent, tool call scanning, PII), content filter IaC (Bicep raiPolicy), agent instruction safety rules, MCP input validation |
-| — | Agent Evaluations | Foundry Evals API targeting registered agents — task adherence, groundedness, coherence, relevance, violence; datasets + script in `evals/` |
+| 1 | Foundation | Refactored orchestrator, profiles, CLI entry point |
+| 2 | Agents + HIL | Multi-turn calculator retry loops, appointment confirm/reschedule/decline |
+| 3 | Foundry IQ Knowledge Base | Advisor Agent grounded in Azure AI Search KB via MCP (3 knowledge sources, cited responses) |
+| 4 | Azure-Hosted MCP Server | Calculator + Scheduler agents calling tools via custom Azure Function App MCP endpoint |
+| 5 | Workflow Agent | Declarative YAML orchestration for Copilot Studio / Teams — simplified 740→289 lines, Power Fx fixes, conversationId isolation, general query handling, graceful HIL fallbacks |
+| 6 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 15 RBAC assignments; two manual portal steps (KB + calendar) |
+| 7 | Guardrails & Content Safety | Four defense layers: Foundry guardrails (per-agent, tool call scanning, PII), content filter IaC (Bicep raiPolicy), agent instruction safety rules, MCP input validation |
+| 8 | Agent Evaluations | OpenAI Evals API targeting registered agents server-side — task adherence, groundedness, coherence, relevance; results in Foundry portal (Build > Evaluations) |
 
 ### Planned
 
 | Phase | Name | Goal | Key Changes |
 |---|---|---|---|
-| **5** | **Web App Deployment** | Deploy to Azure App Service (deferred — VM quota blocked) | `web-app.bicep` ready but not wired; demo runs locally for now |
-| **6** | **Observability** | End-to-end tracing in Azure portal + Foundry | OpenTelemetry + Azure Monitor exporter, per-agent trace spans, conversation audit logging, 90-day retention |
-| **7** | **Authentication** | Entra ID Easy Auth — system knows who the user is | App registration via hook, `X-MS-CLIENT-PRINCIPAL` header extraction, Work IQ Calendar delegated auth |
-| **8** | **Network Isolation** | VNet + private endpoints for financial institution compliance | New `network.bicep` (VNet, 3 subnets, NSG, 3 PEs, 3 DNS zones), disable public access on all backend services, Function App moves to shared B1 plan, MI-based storage auth |
+| **9** | **Web App Deployment** | Deploy to Azure App Service (deferred — VM quota blocked) | `web-app.bicep` ready but not wired; demo runs locally for now |
+| **10** | **Observability** | End-to-end tracing in Azure portal + Foundry | OpenTelemetry + Azure Monitor exporter, per-agent trace spans, conversation audit logging, 90-day retention |
+| **11** | **Authentication** | Entra ID Easy Auth — system knows who the user is | App registration via hook, `X-MS-CLIENT-PRINCIPAL` header extraction, Work IQ Calendar delegated auth |
+| **12** | **Network Isolation** | VNet + private endpoints for financial institution compliance | New `network.bicep` (VNet, 3 subnets, NSG, 3 PEs, 3 DNS zones), disable public access on all backend services, Function App moves to shared B1 plan, MI-based storage auth |
 
-Phase 5 (Web App) is deferred due to subscription VM quota limits. Phases 6-8 can proceed independently once Phase 5 is unblocked. The demo runs locally in the meantime.
+Phase 9 (Web App) is deferred due to subscription VM quota limits. Phases 10-12 can proceed independently once Phase 9 is unblocked. The demo runs locally in the meantime.

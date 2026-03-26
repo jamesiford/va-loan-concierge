@@ -434,6 +434,14 @@ va-loan-concierge/
 │   ├── refi_calculator.py       # Simulated refi savings calculator tool
 │   └── appointment_scheduler.py # Simulated appointment scheduling tool
 │
+├── evals/                       # Agent evaluation datasets and runner
+│   ├── eval_advisor.jsonl       # 15 test queries for Advisor Agent
+│   ├── eval_orchestrator.jsonl  # 10 test queries for Orchestrator routing
+│   └── run_eval.py              # OpenAI Evals API runner (server-side, targets agents)
+│
+├── scripts/
+│   └── create_guardrails.ps1    # Standalone guardrail creation (also in postprovision)
+│
 ├── knowledge/
 │   ├── va_guidelines.md         # Knowledge source 1: VA rules and eligibility
 │   ├── lender_products.md       # Knowledge source 2: Lender loan products
@@ -545,7 +553,14 @@ python main.py
 python main.py --query "Can I use my VA loan benefit a second time?"
 
 # Run tests
-pytest tests/               # 109 tests
+pytest tests/               # 111 tests
+
+# ── Evaluations ───────────────────────────────────────────────────
+# Run agent evaluations (server-side via OpenAI Evals API)
+python evals/run_eval.py                       # advisor eval
+python evals/run_eval.py --agent orchestrator  # orchestrator eval
+python evals/run_eval.py --all                 # both
+python evals/run_eval.py --cleanup             # delete old evals + files
 
 # ── Frontend ──────────────────────────────────────────────────────
 # Install Node dependencies (first time only)
@@ -675,19 +690,20 @@ Workflow Agent. The workflow YAML has been hardened (simplified from 740 to ~289
 Power Fx fixes, conversationId isolation, graceful HIL fallbacks) and validated in the
 Foundry playground.
 
-**Completed:** Phases 0–4 (agents, MCP, Foundry IQ, workflow agent, IaC) + HIL orchestration
-+ workflow hardening (2026-03-24) + guardrails & evaluations (2026-03-25).
-**Next:** Copilot Studio / Teams publishing. Phases 5–8 bring production readiness —
+**Completed:** Phases 1–8 (foundation, agents, MCP, Foundry IQ, workflow agent, IaC,
+guardrails, evaluations) + HIL orchestration + workflow hardening (2026-03-24).
+**Next:** Copilot Studio / Teams publishing. Phases 9–12 bring production readiness —
 deployed web app, observability, authentication, and network isolation.
 
 ---
 
-### Guardrails & Content Safety — ✅ COMPLETE
+### Phase 7. Guardrails & Content Safety — ✅ COMPLETE
 
 Four defense layers implemented for the customer demo:
 
 **Layer 1: Foundry Guardrails (per-agent, REST API)**
-Two custom `raiPolicy` resources created via `scripts/create_guardrails.ps1`:
+Two custom `raiPolicy` resources created via `infra/hooks/postprovision.ps1` (step 8)
+and also available standalone via `scripts/create_guardrails.ps1`:
 - `va-loan-advisor-guardrail` — for the Advisor Agent. Intervention points: user input +
   output. Controls: content safety (Low severity), jailbreak detection, indirect attack
   detection, PII detection, protected material, profanity.
@@ -718,9 +734,11 @@ Each agent's `*_INSTRUCTIONS` includes explicit SAFETY RULES:
 
 ---
 
-### Agent Evaluations — ✅ COMPLETE
+### Phase 8. Agent Evaluations — ✅ COMPLETE
 
-Foundry's OpenAI Evals API evaluates registered agents directly.
+Foundry's OpenAI Evals API evaluates registered agents server-side. Queries are sent
+directly to agents, responses are evaluated by builtin evaluators, and results appear
+in the Foundry portal under Build > Evaluations.
 
 **Evaluation datasets:**
 - `evals/eval_advisor.jsonl` — 15 test queries for the Advisor Agent (eligibility,
@@ -729,21 +747,45 @@ Foundry's OpenAI Evals API evaluates registered agents directly.
   (advisor-only, calculator-only, scheduler-only, mixed, general)
 
 **Evaluation script:** `evals/run_eval.py`
-- Uses `azure-ai-projects` SDK (already in requirements.txt)
-- Targets registered agents by name (`va-loan-advisor-iq`, `va-loan-orchestrator`)
-- Testing criteria: task adherence, groundedness, coherence, relevance, violence
-- Results appear in Foundry portal: Build > Evaluations
+- Uses OpenAI Evals API via `azure-ai-projects` SDK (`oai.evals.create` + `oai.evals.runs.create`)
+- Targets registered agents by name using `azure_ai_agent` target type
+- Inline dataset via `file_content` (avoids file upload extension detection bug)
+- Advisor evaluators: task adherence, groundedness, coherence, relevance
+- Orchestrator evaluators: task adherence (with routing-aware instructions), coherence
+- Polls for server-side completion, prints `report_url` linking to portal results
+- `--cleanup` flag deletes all old evals, runs, and uploaded files
+
+**Key implementation details:**
+- **ViolenceEvaluator excluded** — the `builtin.violence` safety evaluator and the
+  local `ViolenceEvaluator` both require the classic Hub workspace model
+  (`Microsoft.MachineLearningServices/workspaces`). Our next-gen Foundry project
+  uses `CognitiveServices/accounts/.../projects`. Violence safety is handled by
+  our guardrail policies (Layer 1) instead.
+- **Orchestrator task instructions** — the `task_adherence` evaluator receives explicit
+  instructions explaining the orchestrator's routing role, so delegating to the correct
+  agent counts as adherence (not penalized for not answering directly).
+- **Local evaluation SDK (`azure-ai-evaluation`)** — the `evaluate()` function's portal
+  logging via `azure_ai_project` string parameter does upload to the onedp endpoint,
+  but results may not render in the new portal. The OpenAI Evals API is the portal-native
+  path for the new Foundry portal.
 
 **Usage:**
 ```bash
 python evals/run_eval.py                       # advisor eval
 python evals/run_eval.py --agent orchestrator  # orchestrator eval
 python evals/run_eval.py --all                 # both
+python evals/run_eval.py --cleanup             # delete old evals + files
 ```
+
+**Advisor baseline scores (2026-03-25):**
+- Task Adherence: 87% pass
+- Groundedness: 4.87/5 (100% pass)
+- Coherence: 4.07/5 (93% pass)
+- Relevance: 4.67/5 (93% pass)
 
 ---
 
-### 1. Foundry IQ Knowledge Base (replacing FileSearch) — ✅ COMPLETE
+### Phase 3. Foundry IQ Knowledge Base (replacing FileSearch) — ✅ COMPLETE
 
 **Implemented state:**
 `AdvisorAgent` connects to an Azure AI Search Knowledge Base created in the Foundry portal
@@ -781,7 +823,7 @@ was unreliable, so this step is portal-only.
 
 ---
 
-### 2. Azure-Hosted MCP Server (replacing FunctionTool) — ✅ COMPLETE
+### Phase 4. Azure-Hosted MCP Server (replacing FunctionTool) — ✅ COMPLETE
 
 **Implemented state:**
 `CalculatorAgent` and `SchedulerAgent` each connect to the Azure Function App (`mcp-server/`)
@@ -829,7 +871,7 @@ directly using a standard `FunctionApp` HTTP trigger instead.
 
 ---
 
-### 3. Foundry Workflow Agent + Copilot Studio / Teams — ✅ WORKFLOW HARDENED
+### Phase 5. Foundry Workflow Agent + Copilot Studio / Teams — ✅ WORKFLOW HARDENED
 
 **Target surfaces:** M365 Copilot (Work) and Microsoft Teams via Copilot Studio native
 Foundry connector.
@@ -940,7 +982,7 @@ Items deferred:
 
 ---
 
-### 4. Infrastructure-as-Code (`azd up` / `azd down`) — ✅ COMPLETE
+### Phase 6. Infrastructure-as-Code (`azd up` / `azd down`) — ✅ COMPLETE
 
 **Implemented state:**
 Full Azure Developer CLI flow that provisions all infrastructure, deploys code, and registers
@@ -957,11 +999,13 @@ agents with a single `azd up` command. `azd down` tears everything down cleanly.
    - Creates Search data source, index (with vector field), skillset (embedding generation),
      and indexer (blob → skillset → index)
    - Provisions RemoteTool connections for KB MCP and custom MCP
+   - Creates Foundry guardrail policies (`va-loan-advisor-guardrail`, `va-loan-tools-guardrail`)
    - Deploys MCP server to Function App via `func azure functionapp publish --python`
    - Writes `.env` from azd env values
    - Registers all Foundry agents via `deploy_workflow.py`
 3. **Manual steps after `azd up`** (see README.md):
    - Create Foundry IQ Knowledge Base in the portal (wraps the search index)
+   - Assign guardrails to agents in portal (Build > Agents > [agent] > Guardrails)
    - (Optional) Configure Work IQ Calendar connection
 
 **Implementation details:**
@@ -988,7 +1032,7 @@ See README.md for detailed instructions with exact property values.
 
 ---
 
-### 5. Web App Deployment (App Service + Static Build) — DEFERRED (VM quota)
+### Phase 9. Web App Deployment (App Service + Static Build) — DEFERRED (VM quota)
 
 **Status:** Deferred — subscription-wide App Service VM quota is 0 for all classic tiers
 (Free, Shared, Basic, Standard, Premium). Bicep modules (`web-app.bicep`) are written but
@@ -1036,7 +1080,7 @@ code works locally (via `az login`) and in production (via MI).
 
 ---
 
-### 6. Observability — App Insights + OpenTelemetry + Audit — PLANNED
+### Phase 10. Observability — App Insights + OpenTelemetry + Audit — PLANNED
 
 **Goal:** Complete the tracing story so conversation threads, tool calls, and agent
 routing decisions are visible in the Azure portal. Required for financial compliance
@@ -1096,7 +1140,7 @@ Items:
 
 ---
 
-### 7. Authentication — Entra ID Easy Auth — PLANNED
+### Phase 11. Authentication — Entra ID Easy Auth — PLANNED
 
 **Goal:** Add user authentication so the system knows who the logged-in Veteran is.
 Required for Work IQ Calendar (delegated auth) and audit logging.
@@ -1142,7 +1186,7 @@ Items:
 
 ---
 
-### 8. Network Isolation — VNet + Private Endpoints — PLANNED
+### Phase 12. Network Isolation — VNet + Private Endpoints — PLANNED
 
 **Goal:** Lock down all backend services behind a VNet with private endpoints. Only the
 App Service frontend remains publicly accessible (behind Easy Auth). Required for
@@ -1220,12 +1264,18 @@ Items:
 
 ### Phase Sequencing
 
-Phases are numbered in recommended execution order. Each `azd up` leaves the system
-fully working. Phases 6, 7, and 8 are independently deployable after Phase 5.
+Phases 1–8 are complete. Phases 9–12 bring production readiness.
+Each `azd up` leaves the system fully working.
 
 ```
-Phase 5 (Web App)       ← DEFERRED (VM quota); demo runs locally
-    ├── Phase 6 (Observability) — can proceed without web app (local + Foundry tracing)
-    ├── Phase 7 (Auth)          — requires Phase 5 (App Service for Easy Auth)
-    └── Phase 8 (Network)       — requires Phase 5 (VNet integration needs App Service)
+Completed:
+  Phase 1 (Foundation) → Phase 2 (Agents + HIL) → Phase 3 (Foundry IQ KB)
+  → Phase 4 (MCP Server) → Phase 5 (Workflow Agent) → Phase 6 (IaC)
+  → Phase 7 (Guardrails) → Phase 8 (Evaluations)
+
+Planned:
+  Phase 9 (Web App)       ← DEFERRED (VM quota); demo runs locally
+      ├── Phase 10 (Observability) — can proceed without web app (local + Foundry tracing)
+      ├── Phase 11 (Auth)          — requires Phase 9 (App Service for Easy Auth)
+      └── Phase 12 (Network)       — requires Phase 9 (VNet integration needs App Service)
 ```

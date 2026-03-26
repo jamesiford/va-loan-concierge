@@ -247,9 +247,9 @@ $connKbBody = @{
         category = "RemoteTool"
         authType = "ProjectManagedIdentity"
         target = $KB_MCP_URL
-        metadata = @{
-            audience = "https://search.azure.com/"
-        }
+        isSharedToAll = $true
+        audience = "https://search.azure.com/"
+        metadata = @{ ApiType = "Azure" }
     }
 } | ConvertTo-Json -Depth 5
 

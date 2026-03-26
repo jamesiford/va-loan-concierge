@@ -216,5 +216,9 @@ ui/.env.local
 # Reference prototype (not part of the build)
 va-loan-concierge-ui.jsx
 
+# Evaluation generated responses (run_eval.py output)
+evals/*_responses.jsonl
+evals/*_responses_filtered.jsonl
+
 # Claude Code local memory
 .claude/
