@@ -755,6 +755,8 @@ in the Foundry portal under Build > Evaluations.
 - Advisor evaluators: task adherence, groundedness, coherence, relevance
 - Orchestrator evaluators: task adherence (with routing-aware instructions), coherence
 - Polls for server-side completion, prints `report_url` linking to portal results
+- **Eval reuse**: if an eval with the same name already exists, adds a new run to it
+  instead of creating a duplicate — enables tracking score trends across runs in the portal
 - `--cleanup` flag deletes all old evals, runs, and uploaded files
 
 **Key implementation details:**

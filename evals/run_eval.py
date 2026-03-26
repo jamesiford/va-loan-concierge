@@ -160,6 +160,14 @@ def cleanup_evals() -> None:
 # Run evaluation against a registered agent
 # ---------------------------------------------------------------------------
 
+def _find_existing_eval(oai, eval_name: str) -> str | None:
+    """Find an existing eval by name. Returns the eval ID or None."""
+    for eval_item in oai.evals.list():
+        if getattr(eval_item, "name", None) == eval_name:
+            return eval_item.id
+    return None
+
+
 def _run_agent_eval(
     agent_name: str,
     dataset_path: str,
@@ -168,6 +176,10 @@ def _run_agent_eval(
     task_instructions: str | None = None,
 ) -> str | None:
     """Run a server-side evaluation against a registered Foundry agent.
+
+    If an eval with the same name already exists, adds a new run to it
+    instead of creating a duplicate.  This lets you track score trends
+    across runs in the Foundry portal.
 
     Returns the portal report URL on success, None on failure.
     """
@@ -186,32 +198,37 @@ def _run_agent_eval(
     testing_criteria = _build_testing_criteria(evaluator_names, task_instructions)
     logger.info("  Evaluators: %s", ", ".join(evaluator_names))
 
-    # Step 1: Create the eval definition
-    logger.info("  Creating eval definition...")
-    item_properties = {"query": {"type": "string"}}
-    item_required = ["query"]
-    if task_instructions:
-        item_properties["instructions"] = {"type": "string"}
+    # Step 1: Reuse existing eval or create a new one
+    eval_id = _find_existing_eval(oai, eval_name)
+    if eval_id:
+        logger.info("  Reusing existing eval: %s", eval_id)
+    else:
+        logger.info("  Creating new eval definition...")
+        item_properties = {"query": {"type": "string"}}
+        item_required = ["query"]
+        if task_instructions:
+            item_properties["instructions"] = {"type": "string"}
 
-    evaluation = oai.evals.create(
-        name=eval_name,
-        data_source_config={
-            "type": "custom",
-            "item_schema": {
-                "type": "object",
-                "properties": item_properties,
-                "required": item_required,
+        evaluation = oai.evals.create(
+            name=eval_name,
+            data_source_config={
+                "type": "custom",
+                "item_schema": {
+                    "type": "object",
+                    "properties": item_properties,
+                    "required": item_required,
+                },
+                "include_sample_schema": True,
             },
-            "include_sample_schema": True,
-        },
-        testing_criteria=testing_criteria,
-    )
-    logger.info("  Eval ID: %s", evaluation.id)
+            testing_criteria=testing_criteria,
+        )
+        eval_id = evaluation.id
+        logger.info("  Eval ID: %s", eval_id)
 
-    # Step 2: Create a run targeting the registered agent
+    # Step 2: Create a new run against the eval
     logger.info("  Creating eval run (server-side, targeting agent)...")
     eval_run = oai.evals.runs.create(
-        eval_id=evaluation.id,
+        eval_id=eval_id,
         name=f"{agent_name}-{time.strftime('%Y%m%d-%H%M%S')}",
         data_source={
             "type": "azure_ai_target_completions",
@@ -242,7 +259,7 @@ def _run_agent_eval(
 
     # Step 3: Poll until complete
     logger.info("  Waiting for server-side evaluation to complete...")
-    result = _wait_for_run(oai, evaluation.id, eval_run.id)
+    result = _wait_for_run(oai, eval_id, eval_run.id)
 
     if result.status != "completed":
         logger.error("  Eval run failed: %s", getattr(result, "error", "unknown error"))
