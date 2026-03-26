@@ -676,9 +676,70 @@ Power Fx fixes, conversationId isolation, graceful HIL fallbacks) and validated 
 Foundry playground.
 
 **Completed:** Phases 0–4 (agents, MCP, Foundry IQ, workflow agent, IaC) + HIL orchestration
-+ workflow hardening (2026-03-24).
++ workflow hardening (2026-03-24) + guardrails & evaluations (2026-03-25).
 **Next:** Copilot Studio / Teams publishing. Phases 5–8 bring production readiness —
 deployed web app, observability, authentication, and network isolation.
+
+---
+
+### Guardrails & Content Safety — ✅ COMPLETE
+
+Four defense layers implemented for the customer demo:
+
+**Layer 1: Foundry Guardrails (per-agent, REST API)**
+Two custom `raiPolicy` resources created via `scripts/create_guardrails.ps1`:
+- `va-loan-advisor-guardrail` — for the Advisor Agent. Intervention points: user input +
+  output. Controls: content safety (Low severity), jailbreak detection, indirect attack
+  detection, PII detection, protected material, profanity.
+- `va-loan-tools-guardrail` — for Calculator + Scheduler Agents. Same controls plus tool
+  call scanning and tool response scanning (agent-only intervention points).
+- Assigned to agents in Foundry portal: Build > Agents > [agent] > Guardrails > Manage.
+- When assigned, agent guardrail **overrides** the model's default guardrail.
+
+**Layer 2: Content Filter as Code (Bicep)**
+Custom `raiPolicy` resource inlined in `infra/modules/ai-services.bicep`:
+- Attached to the gpt-4.1 model deployment via `raiPolicyName`
+- Tightened thresholds: Violence/Hate/SelfHarm at Low, Sexual at Medium
+- Jailbreak + Indirect Attack detection enabled and blocking
+- Protected Material (text + code) scanning on completions
+- Deployed automatically by `azd up` — content safety as auditable IaC
+
+**Layer 3: Agent Instruction Guardrails**
+Each agent's `*_INSTRUCTIONS` includes explicit SAFETY RULES:
+- Advisor: no financial advice beyond KB, no PII disclosure, no scope creep
+- Calculator: only refi calculations, no PII, flag unreasonable inputs
+- Scheduler: only VA loan appointments, no PII, no system detail disclosure
+
+**Layer 4: MCP Tool Input Validation**
+`mcp-server/server.py` validates all tool inputs before execution:
+- `_validate_refi_inputs()` — rates 0-20%, balance $1K-$10M, term 1-30yr
+- `_validate_scheduler_inputs()` — recognized weekdays only
+- Returns JSON-RPC error on validation failure (tool never executes)
+
+---
+
+### Agent Evaluations — ✅ COMPLETE
+
+Foundry's OpenAI Evals API evaluates registered agents directly.
+
+**Evaluation datasets:**
+- `evals/eval_advisor.jsonl` — 15 test queries for the Advisor Agent (eligibility,
+  funding fees, products, edge cases, out-of-scope)
+- `evals/eval_orchestrator.jsonl` — 10 test queries for routing classification
+  (advisor-only, calculator-only, scheduler-only, mixed, general)
+
+**Evaluation script:** `evals/run_eval.py`
+- Uses `azure-ai-projects` SDK (already in requirements.txt)
+- Targets registered agents by name (`va-loan-advisor-iq`, `va-loan-orchestrator`)
+- Testing criteria: task adherence, groundedness, coherence, relevance, violence
+- Results appear in Foundry portal: Build > Evaluations
+
+**Usage:**
+```bash
+python evals/run_eval.py                       # advisor eval
+python evals/run_eval.py --agent orchestrator  # orchestrator eval
+python evals/run_eval.py --all                 # both
+```
 
 ---
 

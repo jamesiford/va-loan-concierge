@@ -15,6 +15,8 @@ import azure.functions as func
 
 from server import (
     TOOL_SCHEMAS,
+    _validate_refi_inputs,
+    _validate_scheduler_inputs,
     appointment_scheduler,
     refi_savings_calculator,
 )
@@ -92,8 +94,12 @@ async def mcp(req: func.HttpRequest) -> func.HttpResponse:
         arguments = params.get("arguments") or {}
         try:
             if name == "refi_savings_calculator":
+                if err := _validate_refi_inputs(arguments):
+                    return _err(request_id, -32602, f"Input validation failed: {err}")
                 result = refi_savings_calculator(**arguments)
             elif name == "appointment_scheduler":
+                if err := _validate_scheduler_inputs(arguments):
+                    return _err(request_id, -32602, f"Input validation failed: {err}")
                 result = appointment_scheduler(**arguments)
             else:
                 return _err(request_id, -32601, f"Unknown tool: {name}")

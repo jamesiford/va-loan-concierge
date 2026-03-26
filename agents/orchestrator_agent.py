@@ -1,6 +1,5 @@
 """
 VA Loan Concierge — Orchestrator Agent.
-
 Routes each Veteran's query to the appropriate specialized agent(s), collects
 their results, and synthesizes a single unified response.
 

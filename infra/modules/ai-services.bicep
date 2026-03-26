@@ -40,6 +40,39 @@ resource aiServices 'Microsoft.CognitiveServices/accounts@2025-04-01-preview' = 
   }
 }
 
+// ── Content filter (custom RAI policy) ──────────────────────────────────────
+// Tightens severity thresholds below Microsoft.DefaultV2 and enables jailbreak
+// detection, indirect attack detection, and protected material scanning.
+// Agent-level guardrails (per-agent, tool call scanning, PII) are created
+// separately via REST API in postprovision.ps1.
+
+resource contentFilter 'Microsoft.CognitiveServices/accounts/raiPolicies@2025-04-01-preview' = {
+  parent: aiServices
+  name: 'va-loan-content-filter'
+  properties: {
+    mode: 'Default'
+    basePolicyName: 'Microsoft.DefaultV2'
+    contentFilters: [
+      // Prompt filters
+      { name: 'Violence', severityThreshold: 'Low', blocking: true, enabled: true, source: 'Prompt' }
+      { name: 'Hate', severityThreshold: 'Low', blocking: true, enabled: true, source: 'Prompt' }
+      { name: 'Sexual', severityThreshold: 'Medium', blocking: true, enabled: true, source: 'Prompt' }
+      { name: 'Selfharm', severityThreshold: 'Low', blocking: true, enabled: true, source: 'Prompt' }
+      { name: 'Jailbreak', blocking: true, enabled: true, source: 'Prompt' }
+      { name: 'Indirect Attack', blocking: true, enabled: true, source: 'Prompt' }
+      { name: 'Profanity', blocking: true, enabled: true, source: 'Prompt' }
+      // Completion filters
+      { name: 'Violence', severityThreshold: 'Low', blocking: true, enabled: true, source: 'Completion' }
+      { name: 'Hate', severityThreshold: 'Low', blocking: true, enabled: true, source: 'Completion' }
+      { name: 'Sexual', severityThreshold: 'Medium', blocking: true, enabled: true, source: 'Completion' }
+      { name: 'Selfharm', severityThreshold: 'Low', blocking: true, enabled: true, source: 'Completion' }
+      { name: 'Protected Material Text', blocking: true, enabled: true, source: 'Completion' }
+      { name: 'Protected Material Code', blocking: true, enabled: true, source: 'Completion' }
+      { name: 'Profanity', blocking: true, enabled: true, source: 'Completion' }
+    ]
+  }
+}
+
 // ── Model deployment ────────────────────────────────────────────────────────
 
 resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-04-01-preview' = {
@@ -55,6 +88,7 @@ resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-
       name: modelName
       version: modelVersion
     }
+    raiPolicyName: contentFilter.name
   }
 }
 

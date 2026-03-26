@@ -27,6 +27,23 @@ def _monthly_payment(principal: float, annual_rate: float, term_years: int) -> f
     return principal * (r * math.pow(1 + r, n)) / (math.pow(1 + r, n) - 1)
 
 
+def _validate_refi_inputs(args: dict) -> str | None:
+    """Validate refi calculator inputs. Returns error message or None if valid."""
+    rate = args.get("current_rate", 0)
+    new_rate = args.get("new_rate", 0)
+    balance = args.get("balance", 0)
+    term = args.get("remaining_term", 0)
+    if not (0 < rate <= 20):
+        return "current_rate must be between 0% and 20%"
+    if not (0 < new_rate <= 20):
+        return "new_rate must be between 0% and 20%"
+    if not (1_000 <= balance <= 10_000_000):
+        return "balance must be between $1,000 and $10,000,000"
+    if not (1 <= term <= 30):
+        return "remaining_term must be between 1 and 30 years"
+    return None
+
+
 def refi_savings_calculator(
     current_rate: float,
     new_rate: float,
@@ -82,6 +99,16 @@ _DAY_ALIASES: dict[str, str] = {
     "fri": "Friday", "friday": "Friday",
     "sat": "Saturday", "saturday": "Saturday",
 }
+
+
+def _validate_scheduler_inputs(args: dict) -> str | None:
+    """Validate scheduler inputs. Returns error message or None if valid."""
+    day = args.get("preferred_day", "")
+    if not day or day.strip().lower() not in _DAY_ALIASES:
+        valid = sorted(set(_DAY_ALIASES.values()))
+        return f"Unrecognized day: '{day}'. Valid days: {', '.join(valid)}"
+    return None
+
 
 _AVAILABLE_SLOTS: dict[str, list[str]] = {
     "Monday":    ["9:00 AM", "10:00 AM", "11:00 AM", "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM"],

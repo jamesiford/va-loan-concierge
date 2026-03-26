@@ -421,6 +421,8 @@ Three selectable profiles inject personalized context into every agent query:
 | Profile-aware responses | Borrower context injected per-query; calculator uses real loan parameters |
 | Governed, citable AI | Every factual claim traces back to a specific knowledge document |
 | Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams — hardened with HIL parity, graceful fallbacks, and isolated agent contexts |
+| Guardrails & content safety | Four defense layers: per-agent Foundry guardrails (tool call + PII scanning), content filter IaC, agent instruction rules, MCP input validation |
+| Agent evaluations | Foundry Evals API targeting registered agents — task adherence, groundedness, coherence, relevance, violence evaluators with JSONL datasets |
 
 ---
 
@@ -437,6 +439,8 @@ Three selectable profiles inject personalized context into every agent query:
 | 4 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 15 RBAC assignments; two manual portal steps (KB + calendar) |
 | — | Human-in-the-Loop | Multi-turn calculator retry loops, appointment confirm/reschedule/decline, workflow parity |
 | — | Workflow Hardening | Simplified 740→289 lines, Power Fx fixes, conversationId isolation, general query handling, graceful HIL fallbacks |
+| — | Guardrails & Content Safety | Four defense layers: Foundry guardrails (per-agent, tool call scanning, PII), content filter IaC (Bicep raiPolicy), agent instruction safety rules, MCP input validation |
+| — | Agent Evaluations | Foundry Evals API targeting registered agents — task adherence, groundedness, coherence, relevance, violence; datasets + script in `evals/` |
 
 ### Planned
 

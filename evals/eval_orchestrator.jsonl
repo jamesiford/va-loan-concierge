@@ -1,0 +1,10 @@
+{"query": "Am I eligible for an IRRRL?", "expected_route": "advisor"}
+{"query": "Show me my refinance savings", "expected_route": "calculator"}
+{"query": "Book a call for Thursday", "expected_route": "scheduler"}
+{"query": "Am I eligible for an IRRRL, show me savings, and book Thursday", "expected_route": "all"}
+{"query": "What can you do for me?", "expected_route": "general"}
+{"query": "What is the VA funding fee?", "expected_route": "advisor"}
+{"query": "Calculate my monthly savings if I refinance from 6.8% to 6.1%", "expected_route": "calculator"}
+{"query": "Schedule a consultation for Friday morning", "expected_route": "scheduler"}
+{"query": "Can I use my VA loan a second time and schedule a call?", "expected_route": "advisor+scheduler"}
+{"query": "Hello, who are you?", "expected_route": "general"}
