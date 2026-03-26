@@ -485,3 +485,39 @@ Three selectable profiles inject personalized context into every agent query:
 | **12** | **Network Isolation** | VNet + private endpoints for financial institution compliance | New `network.bicep` (VNet, 3 subnets, NSG, 3 PEs, 3 DNS zones), disable public access on all backend services, Function App moves to shared B1 plan, MI-based storage auth |
 
 Phase 9 (Web App) is deferred due to subscription VM quota limits. Phases 10-12 can proceed independently once Phase 9 is unblocked. The demo runs locally in the meantime.
+
+---
+
+## Teams / M365 Copilot Publishing
+
+The workflow agent can be published to Microsoft Teams and M365 Copilot from the Foundry portal.
+
+### Prerequisites
+
+- **Microsoft 365 Copilot license** (full, not Basic) — required for custom agents in M365 Copilot. Copilot Chat (Basic) shows the agent but returns a generic error when invoked.
+- **Same Entra tenant** — the Foundry project, M365 Copilot license, and Teams users must all be in the same Entra tenant. Cross-tenant access requires guest user invitations and RBAC, which may be blocked by tenant policies.
+- **Azure AI User role** — users accessing the agent through Teams must have the `Azure AI User` built-in role on the AI Services account/project.
+
+### Publishing Steps
+
+1. In the Foundry portal, navigate to **Build → Agents → va-loan-concierge-workflow**
+2. Click **Publish** → **Publish to Teams and M365 Copilot**
+3. Fill in the required fields (name, description, icons) and select **Individual** scope
+4. The portal auto-creates a Bot Service resource and Entra ServiceIdentity
+5. After publishing, the agent appears in M365 Copilot (requires full license)
+6. To install in Teams directly, download the **manifest zip** from the publish screen and sideload it via Teams → Apps → Manage your apps → Upload a custom app
+
+### Known Limitations
+
+- **Duplicate responses in Bot Web Chat** — each bot response appears twice. This is a platform-level issue with the activity protocol, not the workflow YAML (Foundry playground shows single responses).
+- **ServiceIdentity type** — the auto-created Bot Service identity cannot be changed to MultiTenant and does not support client secret generation for OAuth configuration.
+- **Embedding deployment stability** — the `text-embedding-3-small` deployment can enter a broken state where it returns `OperationNotSupported`. Fix by deleting and recreating the deployment via CLI:
+  ```bash
+  az cognitiveservices account deployment delete --name <ai-services-name> --resource-group <rg-name> --deployment-name text-embedding-3-small
+  az cognitiveservices account deployment create --name <ai-services-name> --resource-group <rg-name> --deployment-name text-embedding-3-small --model-name text-embedding-3-small --model-version 1 --model-format OpenAI --sku-name Standard --sku-capacity 30
+  ```
+- **Cross-tenant not supported** — if the Foundry project and M365 tenant are different, the Foundry OAuth flow returns 500 errors. Deploy everything in the same tenant.
+
+### Bot Web Chat (Alternative Demo Channel)
+
+If M365 Copilot is unavailable, the Bot Service "Test in Web Chat" in the Azure portal provides a working external channel. Navigate to the Bot Service resource → Test in Web Chat.

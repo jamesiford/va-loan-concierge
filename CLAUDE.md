@@ -961,24 +961,60 @@ preview).
 - **`elseActions` must be safe** — default paths should never trigger side effects
   (e.g., creating calendar events for confused input).
 
-**Backlog — Copilot Studio + Teams**
-Initial attempt completed (Bot Service created, agent published, appeared in M365 Copilot)
-but responses failed in Teams/Copilot channels despite working in Foundry playground.
-Azure resources cleaned up (Bot Service + Entra app registration deleted, agent unpublished).
+**Backlog — Copilot Studio + Teams Publishing** (investigated 2026-03-26)
 
-**When revisited, two approaches to evaluate:**
-1. **Direct publish (retry)** — Same Foundry portal publish flow, but focus on Bot Service
-   resource configuration (auth type, messaging endpoint, channel setup) as the likely root
-   cause. The workflow itself is correct (works in playground).
-2. **Copilot Studio connector** — Use Copilot Studio's native Foundry agent connector to
-   create a CS agent that wraps the workflow, then surface that agent in M365 Copilot
-   Chat / Teams. This adds a layer but leverages CS's proven Teams integration.
+**Root cause fix: Broken embedding deployment**
+The `text-embedding-3-small` deployment was returning `OperationNotSupported` despite having
+`embeddings: true` capability — a broken deployment state. Fix: delete and recreate via CLI.
+This resolved vector search failures on the portal-created chunked index (`ks-va-loan-guidelines-index`,
+21 docs), which in turn fixed the KB MCP `knowledge_base_retrieve` tool and all Advisor agent responses.
 
-Items deferred:
-- [ ] Fix Bot Service configuration OR set up Copilot Studio connector
+**Working channels:**
+- **Foundry Playground** — fully working (admin account)
+- **Bot Web Chat** — fully working (admin account), duplicate response issue (platform-level,
+  activity protocol sends each response twice — not fixable from workflow YAML)
+
+**Bot Service details:**
+- Bot name: `va-loan-concierge-workflow91735` (auto-created by Foundry publish flow)
+- Bot Type: SingleTenant (cannot change — ServiceIdentity type, greyed out in portal)
+- Microsoft App ID: `196859d8-8487-429e-bf79-60230969de99` (ServiceIdentity)
+- Channels: webchat, directline, msteams (all enabled)
+- Schema Transformation Version: V1.3
+- No OAuth Connection Settings configured
+
+**Channels attempted and their blockers:**
+
+| Channel | Result | Blocker |
+|---|---|---|
+| M365 Copilot (admin tenant) | Agent appears, fails silently | Copilot Chat (Basic) — custom agents require full M365 Copilot license |
+| Teams search (admin tenant) | Agent not found | Not installed as Teams app, only published to M365 Copilot |
+| Teams sideload (fordjames tenant) | Bot works, sign-in works, RBAC error | fordjames needs Azure AI User role on admin tenant's Foundry project; admin tenant blocks guest invitations |
+| Teams sideload (admin sign-in) | OAuth 500 error | Foundry `agent-oauth` service returns 500 on cross-tenant OAuth redirect |
+| Copilot Studio (fordjames tenant) | Connector blocked | Power Platform DLP policy "Personal Developer (default)" blocks Azure AI Foundry Agent Service connector |
+| Change Bot Type to MultiTenant | Cannot change | ServiceIdentity type — setting greyed out in portal |
+| Enable guest invitations (admin tenant) | Cannot change | Entra External Collaboration settings locked (managed sandbox tenant) |
+
+**Key learnings for deployment:**
+1. **Same-tenant deployment is critical** — the Foundry project, M365 Copilot license, and
+   Teams users must all be in the same Entra tenant for seamless publishing
+2. **M365 Copilot license required** — Copilot Chat (Basic) does NOT support custom agents;
+   full Microsoft 365 Copilot license is required
+3. **ServiceIdentity limitations** — auto-created by Foundry publish flow; cannot be changed
+   to MultiTenant; cannot generate client secrets for OAuth configuration
+4. **Two search indexes created** — `kb-va-loan-guidelines` (3 docs, original) and
+   `ks-va-loan-guidelines-index` (21 docs, portal-created with chunking/vectors). The KB
+   MCP endpoint uses the chunked index.
+5. **Embedding deployment can silently break** — if vectorization errors appear on the
+   portal-created index, delete and recreate the embedding model deployment
+
+**When revisited with same-tenant setup:**
+- [ ] Ensure M365 Copilot license is available in the deployment tenant
+- [ ] Publish workflow agent from Foundry portal (same flow — already documented)
+- [ ] Verify agent appears and responds in M365 Copilot
+- [ ] Sideload Teams app manifest for direct Teams chat access
 - [ ] Design Adaptive Cards: refi savings card + appointment confirmation card
-- [ ] Verify multi-turn conversation works in Teams
-- [ ] Publish to Microsoft Teams + M365 Copilot (Work) channels
+- [ ] Investigate duplicate response issue in Bot Web Chat
+- [ ] Verify multi-turn HIL conversation works in Teams
 
 ---
 
