@@ -1,18 +1,32 @@
 """
-Loan Scheduler Agent — Foundry new-agent API with Azure-hosted MCP.
+Loan Scheduler Agent — Foundry Agent + Custom MCP Server.
 
-Connects to the custom MCP Function App (mcp-server/) which exposes the
-appointment_scheduler tool for booking VA loan consultation appointments.
+This agent books VA loan consultation appointments using a custom MCP tool
+hosted on an Azure Function App.  It is restricted to scheduling tools
+only — calculations are handled by the Calculator Agent.
 
-The Foundry runtime handles MCP tool execution.  This agent registers the
-tool via MCPTool and makes a single Responses API call per query.
+Architecture:
+  Browser ──► Orchestrator ──► SchedulerAgent ──► Foundry Responses API
+                                                       │
+                                                       ▼
+                                                 MCPTool (custom)
+                                                       │
+                                                       ▼
+                                               Azure Function App
+                                              (mcp-server/server.py)
+                                                       │
+                                                       ▼
+                                            appointment_scheduler()
 
-After the call, response.output is inspected for mcp_call items — these
-carry the tool name, inputs, and outputs — and are emitted as
-scheduler_tool_call / scheduler_tool_result SSE events for the UI flow log.
+After the Scheduler confirms an appointment, the Orchestrator passes the
+confirmed details to the CalendarAgent for M365 calendar event creation.
 
-The orchestrator calls this agent first, then passes the confirmed
-appointment details to the CalendarAgent for calendar event creation.
+Required environment variables:
+  FOUNDRY_PROJECT_ENDPOINT    — Foundry project data-plane endpoint
+  FOUNDRY_MODEL_DEPLOYMENT    — e.g. gpt-4.1
+  FOUNDRY_PROJECT_RESOURCE_ID — ARM resource ID of the Foundry project
+  MCP_TOOLS_ENDPOINT          — Function App MCP URL
+  MCP_TOOLS_CONNECTION        — Name for the RemoteTool connection
 """
 
 import asyncio
@@ -30,7 +44,20 @@ from azure.identity.aio import DefaultAzureCredential
 
 logger = logging.getLogger(__name__)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. AGENT CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# URL-safe agent name — visible in the Foundry portal under Build > Agents.
 _AGENT_NAME = "va-loan-scheduler-mcp"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. AGENT INSTRUCTIONS (the LLM system prompt)
+# ═══════════════════════════════════════════════════════════════════════════════
+# These instructions enforce strict single-tool usage.  The LLM must call
+# appointment_scheduler exactly once and summarize the confirmed appointment.
 
 SCHEDULER_INSTRUCTIONS = (
     "You are a VA loan scheduling assistant. You have ONE tool: "
@@ -49,18 +76,21 @@ SCHEDULER_INSTRUCTIONS = (
 )
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. AGENT CLASS
+# ═══════════════════════════════════════════════════════════════════════════════
+
 class SchedulerAgent:
     """
-    Loan Scheduler Agent powered by Azure AI Foundry new-agent API + MCP.
+    Loan Scheduler Agent powered by Azure AI Foundry + custom MCP server.
 
-    On initialize():
-      Provisions the MCP connection and registers the agent with one
-      MCPTool: appointment_scheduler from the custom MCP Function App.
+    Lifecycle:
+      1. initialize() — provisions the MCP connection + registers the agent
+      2. run(query)   — calls the Responses API and streams SSE events
+      3. close()      — releases async HTTP clients
 
-    On run():
-      Makes a single Responses API call.  The Foundry runtime invokes the
-      MCP tool server-side; response.output contains mcp_call items that
-      are parsed into scheduler_tool_call / scheduler_tool_result SSE events.
+    The orchestrator reads self.last_response after run() to extract the
+    confirmed appointment JSON for the CalendarAgent.
     """
 
     def __init__(self) -> None:
@@ -74,14 +104,24 @@ class SchedulerAgent:
             raise RuntimeError("SchedulerAgent.initialize() has not been called")
         return self._agent_version
 
-    # ------------------------------------------------------------------
-    # Connection provisioning (ARM — sync, run in thread)
-    # ------------------------------------------------------------------
+    # ── Client Setup ───────────────────────────────────────────────────────
+
+    def _get_client(self) -> AIProjectClient:
+        if self._client is None:
+            self._client = AIProjectClient(
+                endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+                credential=DefaultAzureCredential(),
+            )
+        return self._client
+
+    # ── Connection Provisioning ────────────────────────────────────────────
+    # Same pattern as CalculatorAgent — creates a RemoteTool connection
+    # pointing at the same MCP Function App.  Both agents share the same
+    # connection but are restricted to different tools via allowed_tools.
 
     def _create_or_update_connection(self) -> None:
         """
         PUT a RemoteTool project connection pointing at the MCP Function App.
-
         Idempotent — safe to call on every startup.
         """
         project_resource_id = os.environ["FOUNDRY_PROJECT_RESOURCE_ID"]
@@ -112,39 +152,24 @@ class SchedulerAgent:
 
         logger.info(
             "scheduler_agent: creating/updating RemoteTool connection '%s' → %s",
-            connection_name,
-            mcp_ep,
+            connection_name, mcp_ep,
         )
         resp = requests.put(url, headers=headers, json=body, timeout=30)
         if resp.status_code == 403:
             get_resp = requests.get(url, headers=headers, timeout=30)
             if get_resp.status_code == 200:
                 logger.warning(
-                    "scheduler_agent: PUT connection '%s' returned 403 but connection "
-                    "already exists — continuing with existing connection",
+                    "scheduler_agent: PUT returned 403 but connection already exists — continuing",
                     connection_name,
                 )
                 return
             resp.raise_for_status()
         else:
             resp.raise_for_status()
-        logger.info(
-            "scheduler_agent: connection '%s' ready (status %s)",
-            connection_name,
-            resp.status_code,
-        )
+        logger.info("scheduler_agent: connection '%s' ready (status %s)",
+                     connection_name, resp.status_code)
 
-    # ------------------------------------------------------------------
-    # Setup
-    # ------------------------------------------------------------------
-
-    def _get_client(self) -> AIProjectClient:
-        if self._client is None:
-            self._client = AIProjectClient(
-                endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
-                credential=DefaultAzureCredential(),
-            )
-        return self._client
+    # ── Agent Registration (initialize) ────────────────────────────────────
 
     async def initialize(self) -> None:
         """Provision the MCP connection and register a new Foundry agent version."""
@@ -153,6 +178,8 @@ class SchedulerAgent:
         client = self._get_client()
         model = os.environ["FOUNDRY_MODEL_DEPLOYMENT"]
 
+        # allowed_tools restricts this agent to ONLY appointment_scheduler,
+        # even though the same MCP server also hosts refi_savings_calculator.
         mcp_tool = MCPTool(
             server_label="va-loan-tools",
             server_url=os.environ["MCP_TOOLS_ENDPOINT"],
@@ -173,21 +200,69 @@ class SchedulerAgent:
         self._agent_version = version_details.version
         logger.info(
             "scheduler_agent: created Foundry agent '%s' version=%s",
-            _AGENT_NAME,
-            self._agent_version,
+            _AGENT_NAME, self._agent_version,
         )
 
-    # ------------------------------------------------------------------
-    # MCP output parsing
-    # ------------------------------------------------------------------
+    # ── Run (Main Entry Point) ─────────────────────────────────────────────
+
+    async def run(self, query: str) -> AsyncGenerator[dict, None]:
+        """
+        Execute the appointment scheduler via MCP, streaming SSE events.
+
+        Event sequence:
+          scheduler_start       → agent activated
+          scheduler_tool_call   → tool name + inputs
+          scheduler_tool_result → confirmed appointment summary
+          _scheduler_text       → full response text (consumed by orchestrator)
+
+        Also stores the raw Responses API response in self.last_response
+        so the orchestrator can extract appointment details for the
+        CalendarAgent via extract_appointment_result().
+        """
+        self.last_response = None
+
+        yield {"type": "scheduler_start", "message": "Loan Scheduler Agent activated"}
+        await asyncio.sleep(0.1)
+
+        if not self._agent_version:
+            await self.initialize()
+
+        client = self._get_client()
+        openai_client = client.get_openai_client()
+        model = os.environ["FOUNDRY_MODEL_DEPLOYMENT"]
+
+        try:
+            response = await openai_client.responses.create(
+                model=model,
+                input=[{"role": "user", "content": query}],
+                max_tool_calls=1,
+                extra_body={
+                    "agent_reference": {
+                        "name": _AGENT_NAME,
+                        "version": self._agent_version,
+                        "type": "agent_reference",
+                    }
+                },
+            )
+        except Exception as exc:
+            logger.exception("scheduler_agent: error during agent run")
+            yield {"type": "error", "message": f"Scheduler agent error: {exc}"}
+            return
+
+        # Store the raw response so the orchestrator can extract appointment JSON.
+        self.last_response = response
+
+        for event in self._parse_mcp_events(response):
+            yield event
+            await asyncio.sleep(0.2)
+
+        response_text: str = response.output_text or ""
+        yield {"type": "_scheduler_text", "text": response_text}
+
+    # ── MCP Response Parsing ───────────────────────────────────────────────
 
     def _format_tool_result(self, name: str, raw_output: object) -> str:
-        """
-        Format an MCP tool output into a human-readable result message.
-
-        raw_output is typically a JSON string returned by the MCP server.
-        Falls back to a truncated string representation on any parse error.
-        """
+        """Format an MCP tool output into a human-readable one-line summary."""
         try:
             data = json.loads(raw_output) if isinstance(raw_output, str) else raw_output
             if name == "appointment_scheduler":
@@ -202,8 +277,8 @@ class SchedulerAgent:
 
     def _parse_mcp_events(self, response) -> list[dict]:
         """
-        Extract scheduler_tool_call and scheduler_tool_result events from
-        mcp_call items in response.output.
+        Extract scheduler_tool_call and scheduler_tool_result events
+        from mcp_call items in response.output.
         """
         events: list[dict] = []
         for item in response.output or []:
@@ -242,6 +317,10 @@ class SchedulerAgent:
 
         return events
 
+    # ── Appointment Result Extraction ──────────────────────────────────────
+    # The orchestrator calls this after run() to get the raw appointment JSON
+    # that gets passed to the CalendarAgent for calendar event creation.
+
     def extract_appointment_result(self, response) -> str | None:
         """Extract the raw JSON output from the appointment_scheduler mcp_call."""
         for item in response.output or []:
@@ -260,63 +339,7 @@ class SchedulerAgent:
                 return str(raw) if raw else None
         return None
 
-    # ------------------------------------------------------------------
-    # Run
-    # ------------------------------------------------------------------
-
-    async def run(self, query: str) -> AsyncGenerator[dict, None]:
-        """
-        Execute the appointment_scheduler tool via MCP and stream SSE events.
-
-        The final event has ``type == "_scheduler_text"`` carrying the
-        formatted response text; consumed by the orchestrator.
-
-        The raw Responses API response is stored in ``self.last_response``
-        so the orchestrator can extract appointment details for the
-        CalendarAgent.
-        """
-        self.last_response = None
-
-        yield {"type": "scheduler_start", "message": "Loan Scheduler Agent activated"}
-        await asyncio.sleep(0.1)
-
-        if not self._agent_version:
-            await self.initialize()
-
-        client = self._get_client()
-        openai_client = client.get_openai_client()
-        model = os.environ["FOUNDRY_MODEL_DEPLOYMENT"]
-
-        try:
-            response = await openai_client.responses.create(
-                model=model,
-                input=[{"role": "user", "content": query}],
-                max_tool_calls=1,
-                extra_body={
-                    "agent_reference": {
-                        "name": _AGENT_NAME,
-                        "version": self._agent_version,
-                        "type": "agent_reference",
-                    }
-                },
-            )
-        except Exception as exc:
-            logger.exception("scheduler_agent: error during agent run")
-            yield {"type": "error", "message": f"Scheduler agent error: {exc}"}
-            return
-
-        self.last_response = response
-
-        for event in self._parse_mcp_events(response):
-            yield event
-            await asyncio.sleep(0.2)
-
-        response_text: str = response.output_text or ""
-        yield {"type": "_scheduler_text", "text": response_text}
-
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
+    # ── Cleanup ────────────────────────────────────────────────────────────
 
     async def close(self) -> None:
         """Release the async HTTP client."""

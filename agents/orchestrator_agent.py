@@ -1,20 +1,30 @@
 """
 VA Loan Concierge — Orchestrator Agent.
-Routes each Veteran's query to the appropriate specialized agent(s), collects
-their results, and synthesizes a single unified response.
 
-Routing is LLM-driven: the orchestrator Foundry agent classifies each query
-via the Responses API to decide which combination of agents to invoke:
-  - Advisor Agent    — eligibility, guidelines, FAQ
-  - Calculator Agent — refinance savings calculations
-  - Scheduler Agent  — appointment booking via custom MCP
-  - Calendar Agent   — calendar event creation via Work IQ Calendar
+The single entry point for all Veteran queries.  Routes each query to the
+appropriate specialized agent(s), collects their results, and streams
+per-agent partial responses back to the UI.
 
-Keyword classification serves as a fallback if the LLM call fails.
+Architecture:
+  Browser ──► FastAPI ──► Orchestrator ──┬──► AdvisorAgent    (Foundry IQ KB)
+              (SSE)       (this file)    ├──► CalculatorAgent  (Custom MCP)
+                                         ├──► SchedulerAgent   (Custom MCP)
+                                         └──► CalendarAgent    (Work IQ Calendar)
 
-The Orchestrator is also registered as a new Azure AI Foundry agent (visible
-in the portal) but orchestration itself runs in Python — the "hosted agent"
-pattern per Microsoft Foundry documentation.
+Routing is LLM-driven: the orchestrator is itself a registered Foundry agent
+that classifies each query via the Responses API into a 3-way boolean:
+  (needs_advisor, needs_calculator, needs_scheduler)
+
+Multiple may be true for mixed queries.  Keyword classification serves as a
+fallback if the LLM call fails.
+
+Human-in-the-loop (HIL) flows:
+  - Calculator: pauses to collect loan details when no profile is loaded,
+    with up to 3 retries before auto-skipping
+  - Appointment: pauses for confirmation after booking — confirm (→ calendar),
+    reschedule (→ re-run scheduler), or decline (→ skip calendar)
+
+State between turns is tracked in api/conversation_state.py (in-memory, 10-min TTL).
 """
 
 import asyncio
@@ -41,12 +51,21 @@ from profiles import DEMO_PROFILES, _profile_context_block, _demo_context_block
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Orchestrator agent definition (registered as new Foundry agent)
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. AGENT CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# URL-safe agent name (alphanumeric + hyphens, max 63 chars).
+# URL-safe agent name — visible in the Foundry portal under Build > Agents.
 _ORCHESTRATOR_NAME = "va-loan-orchestrator"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. ORCHESTRATOR INSTRUCTIONS (the LLM system prompt for routing)
+# ═══════════════════════════════════════════════════════════════════════════════
+# The orchestrator LLM classifies each query into a JSON object with three
+# boolean flags.  It does NOT answer questions directly — it only routes.
+# When all flags are false (general/meta query), the LLM writes a friendly
+# capabilities response in the "response" field.
 
 ORCHESTRATOR_INSTRUCTIONS = """\
 You are the VA Loan Concierge — a routing coordinator for a VA mortgage lender.
@@ -86,9 +105,11 @@ Do NOT default to needs_advisor for general/meta queries. Only set needs_advisor
 to true when the Veteran is asking a substantive VA loan question.
 """
 
-# ---------------------------------------------------------------------------
-# Keyword routing helpers (fallback when LLM classification fails)
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. KEYWORD ROUTING (fallback when LLM classification fails)
+# ═══════════════════════════════════════════════════════════════════════════════
+# If the LLM classification call fails (network error, unparseable output),
+# we fall back to keyword matching.  This ensures the demo always works.
 
 _ADVISOR_KEYWORDS: frozenset[str] = frozenset({
     "eligib", "qualify", "can i", "entitlement", "coe", "benefit",
@@ -147,9 +168,9 @@ def _route_label(needs_advisor: bool, needs_calculator: bool, needs_scheduler: b
     return " + ".join(agents) if agents else "Concierge (general)"
 
 
-# ---------------------------------------------------------------------------
-# Orchestrator
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4. ORCHESTRATOR CLASS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class Orchestrator:
     """
@@ -179,6 +200,8 @@ class Orchestrator:
         self._calendar: CalendarAgent | None = None
         self._orchestrator_version: str | None = None
 
+    # ── Client Setup ───────────────────────────────────────────────────────
+
     def _get_client(self) -> AIProjectClient:
         if self._client is None:
             self._client = AIProjectClient(
@@ -187,13 +210,16 @@ class Orchestrator:
             )
         return self._client
 
+    # ── Agent Registration (initialize) ────────────────────────────────────
+    # Creates all four sub-agents, initializes them concurrently, then
+    # registers the orchestrator itself as a Foundry agent (for LLM routing).
+
     async def initialize(self) -> None:
         """
-        Initialize sub-agents and register the orchestrator as a new Foundry agent.
+        Initialize sub-agents and register the orchestrator as a Foundry agent.
 
-        Sub-agents are initialized concurrently (advisor KB connection runs
-        in parallel with calculator and scheduler agent registration). The
-        orchestrator Foundry registration runs last.
+        Sub-agents are initialized concurrently — advisor KB connection runs
+        in parallel with calculator/scheduler/calendar agent registration.
         """
         logger.info("orchestrator: initializing sub-agents")
         self._advisor = AdvisorAgent()
@@ -228,6 +254,11 @@ class Orchestrator:
             _ORCHESTRATOR_NAME,
             self._orchestrator_version,
         )
+
+    # ── LLM-Driven Routing ───────────────────────────────────────────────
+    # The orchestrator calls its own registered Foundry agent to classify
+    # the query.  The LLM returns a JSON object with three boolean flags
+    # and an optional general response string.
 
     async def _llm_classify(self, query: str) -> tuple[bool, bool, bool, str]:
         """
@@ -292,9 +323,10 @@ class Orchestrator:
             )
             return _classify_hint(query)
 
-    # ------------------------------------------------------------------
-    # Human-in-the-loop: classify user's response to an appointment
-    # ------------------------------------------------------------------
+    # ── HIL: Appointment Confirmation Classification ──────────────────────
+    # After the scheduler books an appointment, the orchestrator pauses and
+    # asks the user to confirm, reschedule, or decline.  This method
+    # classifies the user's response using LLM with keyword fallback.
 
     async def _classify_confirmation(self, user_response: str) -> str:
         """
@@ -352,9 +384,10 @@ class Orchestrator:
             return "reschedule"
         return "confirm"
 
-    # ------------------------------------------------------------------
-    # Main entry point — new conversation or resume
-    # ------------------------------------------------------------------
+    # ── Run (Main Entry Point) ─────────────────────────────────────────────
+    # The FastAPI server calls run(query, profile_id, conversation_id) and
+    # iterates over the yielded SSE events.  If conversation_id matches a
+    # paused conversation, the flow resumes from where it left off (HIL).
 
     async def run(
         self,
@@ -389,9 +422,9 @@ class Orchestrator:
             async for event in self._run_new(query, profile_id):
                 yield event
 
-    # ------------------------------------------------------------------
-    # New conversation flow
-    # ------------------------------------------------------------------
+    # ── New Conversation Flow ─────────────────────────────────────────────
+    # Full pipeline: classify → advisor → calculator → scheduler → calendar.
+    # May pause at any point for human-in-the-loop input.
 
     async def _run_new(
         self, query: str, profile_id: str | None = None
@@ -512,9 +545,11 @@ class Orchestrator:
         async for event in self._run_calculator_through_end(state, has_response):
             yield event
 
-    # ------------------------------------------------------------------
-    # Resume from a paused conversation
-    # ------------------------------------------------------------------
+    # ── Resume from HIL Pause ─────────────────────────────────────────────
+    # When the orchestrator pauses for user input (await_input event), the
+    # next request arrives with the same conversation_id and routes here.
+    # Three pause types: awaiting_profile_info, awaiting_calculator_retry,
+    # awaiting_appointment_confirmation.
 
     async def _resume(
         self, state: ConversationState, user_response: str
@@ -685,9 +720,9 @@ class Orchestrator:
             async for event in self._run_new(user_response, state.profile_id):
                 yield event
 
-    # ------------------------------------------------------------------
-    # Shared flow segments (used by both new and resume paths)
-    # ------------------------------------------------------------------
+    # ── Shared Flow: Calculator → Scheduler → Calendar → Done ────────────
+    # Used by both _run_new() and _resume() to avoid duplicating the
+    # calculator-through-completion pipeline.
 
     async def _run_calculator_through_end(
         self, state: ConversationState, has_response: bool
@@ -906,6 +941,8 @@ class Orchestrator:
                 "label": "Calendar",
                 "content": calendar_text,
             }
+
+    # ── Cleanup ────────────────────────────────────────────────────────────
 
     async def close(self) -> None:
         """Release async HTTP clients for all agents."""

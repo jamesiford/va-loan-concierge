@@ -1,16 +1,28 @@
 """
-Calendar Agent — Foundry new-agent API with Work IQ Calendar MCP.
+Calendar Agent — Foundry Agent + Work IQ Calendar MCP.
 
-Creates calendar events on the Veteran's personal calendar using
-Microsoft's Work IQ Calendar MCP server (mcp_CalendarTools_graph_createEvent).
+This agent creates calendar events on the Veteran's personal M365 calendar
+using Microsoft's Work IQ Calendar MCP server.  It is the final agent in
+the scheduling pipeline:
 
-The orchestrator calls this agent after the SchedulerAgent has confirmed an
-appointment slot, passing the appointment details (date, time, loan officer,
-confirmation number) so a calendar event can be created.
+  Orchestrator ──► SchedulerAgent (books appointment)
+                       │
+                       ▼ (confirmed appointment JSON)
+                   CalendarAgent (creates M365 calendar event)
 
-After the call, response.output is inspected for mcp_call items — the tool
-name, inputs, and outputs are emitted as calendar_tool_call /
-calendar_tool_result SSE events for the UI flow log.
+Unlike the Calculator and Scheduler agents, this agent does NOT use a custom
+MCP server.  It connects to Microsoft's hosted Work IQ Calendar endpoint,
+which provides M365-native calendar operations via MCP.
+
+Important: allowed_tools uses the raw MCP tool name ("CreateEvent"), NOT
+the Foundry-prefixed name ("mcp_CalendarTools_graph_createEvent").  Using
+the prefixed name causes the tools list to return empty.
+
+Required environment variables:
+  FOUNDRY_PROJECT_ENDPOINT       — Foundry project data-plane endpoint
+  FOUNDRY_MODEL_DEPLOYMENT       — e.g. gpt-4.1
+  SCHEDULER_CALENDAR_ENDPOINT    — Work IQ Calendar MCP server URL (Microsoft-hosted)
+  SCHEDULER_CALENDAR_CONNECTION  — Foundry project connection name
 """
 
 import asyncio
@@ -25,7 +37,20 @@ from azure.identity.aio import DefaultAzureCredential
 
 logger = logging.getLogger(__name__)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. AGENT CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# URL-safe agent name — visible in the Foundry portal under Build > Agents.
 _AGENT_NAME = "va-loan-calendar-mcp"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. AGENT INSTRUCTIONS (the LLM system prompt)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Very directive instructions — the LLM MUST call CreateEvent and MUST NOT
+# skip it.  This agent has the narrowest scope of all agents.
 
 CALENDAR_INSTRUCTIONS = (
     "You are a calendar assistant. Your ONLY job is to call the "
@@ -43,19 +68,21 @@ CALENDAR_INSTRUCTIONS = (
 )
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. AGENT CLASS
+# ═══════════════════════════════════════════════════════════════════════════════
+
 class CalendarAgent:
     """
-    Calendar Agent powered by Azure AI Foundry new-agent API + Work IQ Calendar MCP.
+    Calendar Agent powered by Azure AI Foundry + Work IQ Calendar MCP.
 
-    On initialize():
-      Registers the agent with one MCPTool from the Work IQ Calendar server:
-        mcp_CalendarTools_graph_createEvent — create calendar events
+    Lifecycle:
+      1. initialize() — registers the agent with the Work IQ Calendar tool
+      2. run(query)   — calls the Responses API and streams SSE events
+      3. close()      — releases async HTTP clients
 
-    On run():
-      Makes a single Responses API call with max_tool_calls=1.  The Foundry
-      runtime invokes the MCP tool server-side; response.output contains
-      mcp_call items parsed into calendar_tool_call / calendar_tool_result
-      SSE events.
+    No connection provisioning needed — the Work IQ Calendar connection is
+    configured manually in the Foundry portal (requires M365 Copilot license).
     """
 
     def __init__(self) -> None:
@@ -69,9 +96,7 @@ class CalendarAgent:
             raise RuntimeError("CalendarAgent.initialize() has not been called")
         return self._agent_version
 
-    # ------------------------------------------------------------------
-    # Setup
-    # ------------------------------------------------------------------
+    # ── Client Setup ───────────────────────────────────────────────────────
 
     def _get_client(self) -> AIProjectClient:
         if self._client is None:
@@ -81,11 +106,22 @@ class CalendarAgent:
             )
         return self._client
 
+    # ── Agent Registration (initialize) ────────────────────────────────────
+    # No connection provisioning needed — unlike the Calculator and Scheduler
+    # agents, the Work IQ Calendar connection is managed in the Foundry portal
+    # (it requires an OAuth consent flow for M365 calendar access).
+
     async def initialize(self) -> None:
         """Register a new Foundry agent version with Work IQ Calendar MCP."""
         client = self._get_client()
         model = os.environ["FOUNDRY_MODEL_DEPLOYMENT"]
 
+        # MCPTool configuration for Work IQ Calendar:
+        #   server_url — Microsoft's hosted MCP endpoint (not our Function App)
+        #   allowed_tools — "CreateEvent" is the RAW MCP tool name.
+        #     IMPORTANT: Do NOT use the Foundry-prefixed name
+        #     "mcp_CalendarTools_graph_createEvent" — that causes the tools
+        #     list to return empty and the agent won't call anything.
         calendar_tool = MCPTool(
             server_label="workiq-calendar",
             server_url=os.environ["SCHEDULER_CALENDAR_ENDPOINT"],
@@ -106,85 +142,20 @@ class CalendarAgent:
         self._agent_version = version_details.version
         logger.info(
             "calendar_agent: created Foundry agent '%s' version=%s",
-            _AGENT_NAME,
-            self._agent_version,
+            _AGENT_NAME, self._agent_version,
         )
 
-    # ------------------------------------------------------------------
-    # MCP output parsing
-    # ------------------------------------------------------------------
-
-    def _format_tool_result(self, name: str, raw_output: object) -> str:
-        """Format an MCP tool output into a human-readable result message."""
-        try:
-            data = json.loads(raw_output) if isinstance(raw_output, str) else raw_output
-            if name in ("CreateEvent", "mcp_CalendarTools_graph_createEvent"):
-                event_id = data.get("eventId") or data.get("id", "")
-                return f"Calendar event created (ID: {event_id})" if event_id else "Calendar event created"
-        except Exception:
-            logger.debug("calendar_agent: could not parse tool result for '%s'", name, exc_info=True)
-        return str(raw_output)[:200] if raw_output else f"{name} completed"
-
-    def _parse_mcp_events(self, response) -> list[dict]:
-        """
-        Extract calendar_tool_call and calendar_tool_result events from
-        mcp_call items in response.output.
-        """
-        events: list[dict] = []
-        for item in response.output or []:
-            item_type = getattr(item, "type", None) or (
-                item.get("type") if isinstance(item, dict) else None
-            )
-            if item_type != "mcp_call":
-                continue
-
-            name: str = getattr(item, "name", None) or (
-                item.get("name") if isinstance(item, dict) else ""
-            ) or ""
-
-            raw_input = getattr(item, "input", None) or (
-                item.get("input") if isinstance(item, dict) else {}
-            ) or {}
-            if isinstance(raw_input, str):
-                try:
-                    raw_input = json.loads(raw_input)
-                except Exception:
-                    raw_input = {}
-
-            raw_output = getattr(item, "output", None) or (
-                item.get("output") if isinstance(item, dict) else ""
-            ) or ""
-
-            events.append({
-                "type": "calendar_tool_call",
-                "message": name,
-                "inputs": raw_input,
-            })
-            events.append({
-                "type": "calendar_tool_result",
-                "message": self._format_tool_result(name, raw_output),
-            })
-
-        return events
-
-    # ------------------------------------------------------------------
-    # Run
-    # ------------------------------------------------------------------
+    # ── Run (Main Entry Point) ─────────────────────────────────────────────
 
     async def run(self, query: str) -> AsyncGenerator[dict, None]:
         """
-        Check availability and create a calendar event via Work IQ Calendar MCP.
+        Create a calendar event via Work IQ Calendar MCP, streaming SSE events.
 
-        The query should contain the confirmed appointment details from the
-        SchedulerAgent. The agent first checks availability via findMeetingTimes,
-        then creates the event if the slot is open.
-
-        The final event has ``type == "_calendar_text"`` carrying the
-        formatted response text; consumed by the orchestrator.
-
-        The raw Responses API response is stored in ``self.last_response``
-        so the orchestrator can check whether the event was created or if
-        alternative times were returned.
+        Event sequence:
+          calendar_start       → agent activated
+          calendar_tool_call   → CreateEvent + inputs
+          calendar_tool_result → event created confirmation
+          _calendar_text       → full response text (consumed by orchestrator)
         """
         self.last_response = None
 
@@ -225,9 +196,62 @@ class CalendarAgent:
         response_text: str = response.output_text or ""
         yield {"type": "_calendar_text", "text": response_text}
 
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
+    # ── MCP Response Parsing ───────────────────────────────────────────────
+
+    def _format_tool_result(self, name: str, raw_output: object) -> str:
+        """Format an MCP tool output into a human-readable result message."""
+        try:
+            data = json.loads(raw_output) if isinstance(raw_output, str) else raw_output
+            if name in ("CreateEvent", "mcp_CalendarTools_graph_createEvent"):
+                event_id = data.get("eventId") or data.get("id", "")
+                return f"Calendar event created (ID: {event_id})" if event_id else "Calendar event created"
+        except Exception:
+            logger.debug("calendar_agent: could not parse tool result for '%s'", name, exc_info=True)
+        return str(raw_output)[:200] if raw_output else f"{name} completed"
+
+    def _parse_mcp_events(self, response) -> list[dict]:
+        """
+        Extract calendar_tool_call and calendar_tool_result events
+        from mcp_call items in response.output.
+        """
+        events: list[dict] = []
+        for item in response.output or []:
+            item_type = getattr(item, "type", None) or (
+                item.get("type") if isinstance(item, dict) else None
+            )
+            if item_type != "mcp_call":
+                continue
+
+            name: str = getattr(item, "name", None) or (
+                item.get("name") if isinstance(item, dict) else ""
+            ) or ""
+
+            raw_input = getattr(item, "input", None) or (
+                item.get("input") if isinstance(item, dict) else {}
+            ) or {}
+            if isinstance(raw_input, str):
+                try:
+                    raw_input = json.loads(raw_input)
+                except Exception:
+                    raw_input = {}
+
+            raw_output = getattr(item, "output", None) or (
+                item.get("output") if isinstance(item, dict) else ""
+            ) or ""
+
+            events.append({
+                "type": "calendar_tool_call",
+                "message": name,
+                "inputs": raw_input,
+            })
+            events.append({
+                "type": "calendar_tool_result",
+                "message": self._format_tool_result(name, raw_output),
+            })
+
+        return events
+
+    # ── Cleanup ────────────────────────────────────────────────────────────
 
     async def close(self) -> None:
         """Release the async HTTP client."""
