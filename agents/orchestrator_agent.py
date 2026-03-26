@@ -27,6 +27,7 @@ from azure.ai.projects.aio import AIProjectClient
 from azure.ai.projects.models import PromptAgentDefinition
 from azure.identity.aio import DefaultAzureCredential
 
+from api.telemetry import get_tracer
 from agents.advisor_agent import AdvisorAgent
 from agents.calculator_agent import CalculatorAgent
 from agents.calendar_agent import CalendarAgent
@@ -408,9 +409,14 @@ class Orchestrator:
         yield {"type": "orchestrator_start", "message": "Analyzing your query..."}
         await asyncio.sleep(0.15)
 
-        needs_advisor, needs_calculator, needs_scheduler, general_response = (
-            await self._llm_classify(query)
-        )
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "orchestrator.classify",
+            attributes={"query": query[:500]},
+        ):
+            needs_advisor, needs_calculator, needs_scheduler, general_response = (
+                await self._llm_classify(query)
+            )
         state.needs_advisor = needs_advisor
         state.needs_calculator = needs_calculator
         state.needs_scheduler = needs_scheduler
@@ -452,16 +458,17 @@ class Orchestrator:
         # ── Run advisor agent ────────────────────────────────────────────
         advisor_text = ""
         if needs_advisor and self._advisor:
-            try:
-                async for event in self._advisor.run(enriched_query):
-                    if event["type"] == "_advisor_text":
-                        advisor_text = event.get("text", "")
-                    else:
-                        yield event
-            except Exception as exc:
-                logger.exception("orchestrator: advisor run raised unexpectedly")
-                yield {"type": "error", "message": f"Advisor error: {exc}"}
-                return
+            with tracer.start_as_current_span("agent.advisor"):
+                try:
+                    async for event in self._advisor.run(enriched_query):
+                        if event["type"] == "_advisor_text":
+                            advisor_text = event.get("text", "")
+                        else:
+                            yield event
+                except Exception as exc:
+                    logger.exception("orchestrator: advisor run raised unexpectedly")
+                    yield {"type": "error", "message": f"Advisor error: {exc}"}
+                    return
 
             if advisor_text:
                 has_response = True
@@ -686,6 +693,7 @@ class Orchestrator:
         self, state: ConversationState, has_response: bool
     ) -> AsyncGenerator[dict, None]:
         """Run calculator → scheduler → appointment confirmation → calendar → done."""
+        tracer = get_tracer()
 
         # ── Run calculator agent ─────────────────────────────────────────
         calculator_text = ""
@@ -706,18 +714,19 @@ class Orchestrator:
                 calculator_query = state.enriched_query + calc_context
 
             tool_was_called = False
-            try:
-                async for event in self._calculator.run(calculator_query):
-                    if event["type"] == "_calculator_text":
-                        calculator_text = event.get("text", "")
-                    else:
-                        if event["type"] == "calculator_tool_call":
-                            tool_was_called = True
-                        yield event
-            except Exception as exc:
-                logger.exception("orchestrator: calculator run raised unexpectedly")
-                yield {"type": "error", "message": f"Calculator error: {exc}"}
-                return
+            with tracer.start_as_current_span("agent.calculator"):
+                try:
+                    async for event in self._calculator.run(calculator_query):
+                        if event["type"] == "_calculator_text":
+                            calculator_text = event.get("text", "")
+                        else:
+                            if event["type"] == "calculator_tool_call":
+                                tool_was_called = True
+                            yield event
+                except Exception as exc:
+                    logger.exception("orchestrator: calculator run raised unexpectedly")
+                    yield {"type": "error", "message": f"Calculator error: {exc}"}
+                    return
 
             if calculator_text:
                 has_response = True
@@ -841,16 +850,18 @@ class Orchestrator:
             scheduler_query = state.enriched_query + sched_context
 
         scheduler_text = ""
-        try:
-            async for event in self._scheduler.run(scheduler_query):
-                if event["type"] == "_scheduler_text":
-                    scheduler_text = event.get("text", "")
-                else:
-                    yield event
-        except Exception as exc:
-            logger.exception("orchestrator: scheduler run raised unexpectedly")
-            yield {"type": "error", "message": f"Scheduler error: {exc}"}
-            return
+        tracer = get_tracer()
+        with tracer.start_as_current_span("agent.scheduler"):
+            try:
+                async for event in self._scheduler.run(scheduler_query):
+                    if event["type"] == "_scheduler_text":
+                        scheduler_text = event.get("text", "")
+                    else:
+                        yield event
+            except Exception as exc:
+                logger.exception("orchestrator: scheduler run raised unexpectedly")
+                yield {"type": "error", "message": f"Scheduler error: {exc}"}
+                return
 
         if scheduler_text:
             state.scheduler_text = scheduler_text
@@ -876,15 +887,17 @@ class Orchestrator:
             f"{state.appointment_json}"
         )
         calendar_text = ""
-        try:
-            async for event in self._calendar.run(calendar_query):
-                if event["type"] == "_calendar_text":
-                    calendar_text = event.get("text", "")
-                else:
-                    yield event
-        except Exception as exc:
-            logger.exception("orchestrator: calendar run raised unexpectedly")
-            yield {"type": "error", "message": f"Calendar error: {exc}"}
+        tracer = get_tracer()
+        with tracer.start_as_current_span("agent.calendar"):
+            try:
+                async for event in self._calendar.run(calendar_query):
+                    if event["type"] == "_calendar_text":
+                        calendar_text = event.get("text", "")
+                    else:
+                        yield event
+            except Exception as exc:
+                logger.exception("orchestrator: calendar run raised unexpectedly")
+                yield {"type": "error", "message": f"Calendar error: {exc}"}
 
         if calendar_text:
             yield {

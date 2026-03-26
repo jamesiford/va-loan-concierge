@@ -377,6 +377,7 @@ Microsoft.CognitiveServices/accounts (kind: AIServices)   ← ais-{env}
 | MCP Tools Connection | `MCP_TOOLS_CONNECTION` | postprovision hook |
 | Scheduler Calendar Endpoint | `SCHEDULER_CALENDAR_ENDPOINT` | **Manual** (portal) |
 | Scheduler Calendar Connection | `SCHEDULER_CALENDAR_CONNECTION` | **Manual** (portal) |
+| App Insights Connection String | `APPLICATIONINSIGHTS_CONNECTION_STRING` | azd output |
 
 Authentication: `DefaultAzureCredential` for local dev (requires `az login` before running).
 Never use API keys in code — always use credential objects. The AI Services account uses
@@ -419,6 +420,7 @@ va-loan-concierge/
 ├── api/
 │   ├── __init__.py
 │   ├── server.py                # FastAPI server — exposes /api/chat SSE endpoint
+│   ├── telemetry.py             # OpenTelemetry setup — Azure Monitor exporter, per-agent spans
 │   └── conversation_state.py    # In-memory HIL state (ConversationState dataclass, TTL-based)
 │
 ├── agents/
@@ -690,10 +692,10 @@ Workflow Agent. The workflow YAML has been hardened (simplified from 740 to ~289
 Power Fx fixes, conversationId isolation, graceful HIL fallbacks) and validated in the
 Foundry playground.
 
-**Completed:** Phases 1–8 (foundation, agents, MCP, Foundry IQ, workflow agent, IaC,
-guardrails, evaluations) + HIL orchestration + workflow hardening (2026-03-24).
-**Next:** Copilot Studio / Teams publishing. Phases 9–12 bring production readiness —
-deployed web app, observability, authentication, and network isolation.
+**Completed:** Phases 1–8 + 10 (foundation, agents, MCP, Foundry IQ, workflow agent, IaC,
+guardrails, evaluations, observability) + HIL orchestration + workflow hardening.
+**Next:** Phase 9 (web app, deferred — VM quota) → 11 (auth) → 12 (network isolation).
+Teams publishing investigated 2026-03-26 — blocked by cross-tenant limitations.
 
 ---
 
@@ -1116,63 +1118,65 @@ code works locally (via `az login`) and in production (via MI).
 
 ---
 
-### Phase 10. Observability — App Insights + OpenTelemetry + Audit — PLANNED
+### Phase 10. Observability — App Insights + OpenTelemetry + Audit — ✅ COMPLETE
 
-**Goal:** Complete the tracing story so conversation threads, tool calls, and agent
-routing decisions are visible in the Azure portal. Required for financial compliance
-audit trails.
+**Two complementary tracing systems:**
 
-**Foundry Portal Tracing (already works):**
+**Foundry Portal Tracing (automatic — no code needed):**
 Agent traces are tied to the agent/project, NOT the calling surface. Every Responses API
 call — whether from the playground, CLI, or the FastAPI server — generates a trace visible
 in the Foundry portal under **Tracing**. Thread IDs, tool calls, and token usage all
 appear. No additional configuration needed.
 
-**New file: `api/telemetry.py`**
+**App Insights / OpenTelemetry (Phase 10 — application-level):**
+Captures the HTTP request lifecycle, routing classification timing, and per-agent latency
+breakdown. Complements Foundry traces with the operational/infrastructure view.
+
+**Implemented files:**
+
+`api/telemetry.py` (new):
 - `setup_telemetry(app)` — initializes OTel `TracerProvider` with `AzureMonitorTraceExporter`
+- `get_tracer()` — returns the configured tracer (or no-op if telemetry disabled)
 - Instruments: FastAPI (request spans), `requests` (ARM calls), `aiohttp` (Foundry SDK)
 - No-ops gracefully when `APPLICATIONINSIGHTS_CONNECTION_STRING` is absent (local dev)
 
-**Modify: `requirements.txt`** — add:
-```
-opentelemetry-api>=1.25.0
-opentelemetry-sdk>=1.25.0
-opentelemetry-instrumentation-fastapi>=0.46b0
-opentelemetry-instrumentation-requests>=0.46b0
-opentelemetry-instrumentation-aiohttp>=0.46b0
-azure-monitor-opentelemetry-exporter>=1.0.0b27
-```
+`requirements.txt` — added 6 OTel packages:
+- `opentelemetry-api`, `opentelemetry-sdk`
+- `opentelemetry-instrumentation-fastapi`, `-requests`, `-aiohttp-client`
+- `azure-monitor-opentelemetry-exporter`
 
-**Modify: `api/server.py`**
-- Call `setup_telemetry(app)` in the lifespan function before orchestrator init
-- Add `_log_conversation()` — creates OTel span with attributes: query, profile_id,
-  agent chain, user identity (from Phase 7 if complete)
+`api/server.py`:
+- Calls `setup_telemetry(app)` in the lifespan function before orchestrator init
+- Wraps each chat request in a `chat_request` span with query, profile_id,
+  conversation_id attributes
 
-**Modify: `agents/orchestrator_agent.py`**
-- Add OTel spans around routing classification and each sub-agent call
-- Trace hierarchy: `POST /api/chat` → `orchestrator.classify` → `agent.advisor` →
-  `agent.calculator` → `agent.scheduler` → `agent.calendar`
-- All visible in App Insights Transaction Search and Application Map
+`agents/orchestrator_agent.py`:
+- OTel spans around routing classification (`orchestrator.classify`) and each sub-agent
+  call (`agent.advisor`, `agent.calculator`, `agent.scheduler`, `agent.calendar`)
+- Trace hierarchy: `POST /api/chat` → `chat_request` → `orchestrator.classify` →
+  `agent.advisor` → `agent.calculator` → `agent.scheduler` → `agent.calendar`
 
-**Modify: `infra/modules/monitoring.bicep`**
-- Increase `retentionInDays` from 30 to 90 (financial compliance)
+`infra/modules/monitoring.bicep`:
+- Increased `retentionInDays` from 30 to 90 (financial compliance)
 
-**App Settings** (already set from Phase 5):
-- `APPLICATIONINSIGHTS_CONNECTION_STRING`
-- `OTEL_SERVICE_NAME: 'va-loan-concierge'`
+`infra/main.bicep`:
+- Added `APPLICATIONINSIGHTS_CONNECTION_STRING` as azd output
+
+`infra/hooks/postprovision.ps1`:
+- Writes `APPLICATIONINSIGHTS_CONNECTION_STRING` to `.env`
+
+**Where to look:**
+
+| What | Where | How |
+|---|---|---|
+| LLM inputs/outputs, tool calls, tokens | Foundry portal → Build → Tracing | Automatic (Responses API) |
+| HTTP requests, agent timing, routing | App Insights → Transaction Search | OTel spans (Phase 10) |
+| Service topology | App Insights → Application Map | Auto-discovered from spans |
+| Agent latency breakdown | App Insights → Performance | Per-operation timing |
 
 **Future consideration:** For long-term audit trails beyond App Insights retention,
 add a persistent conversation store (Cosmos DB or Table Storage). Out of scope for
 initial implementation — App Insights + Foundry tracing covers the demo.
-
-Items:
-- [ ] Create `api/telemetry.py` (OTel setup + Azure Monitor exporter)
-- [ ] Modify `requirements.txt` — add OTel packages
-- [ ] Modify `api/server.py` — call setup_telemetry + add conversation audit logging
-- [ ] Modify `agents/orchestrator_agent.py` — add OTel spans per agent
-- [ ] Modify `infra/modules/monitoring.bicep` — increase retention to 90 days
-- [ ] Test: run query → App Insights Transaction Search shows full trace hierarchy
-- [ ] Verify: Foundry portal Tracing shows agent traces from API-originated requests
 
 ---
 
@@ -1307,11 +1311,10 @@ Each `azd up` leaves the system fully working.
 Completed:
   Phase 1 (Foundation) → Phase 2 (Agents + HIL) → Phase 3 (Foundry IQ KB)
   → Phase 4 (MCP Server) → Phase 5 (Workflow Agent) → Phase 6 (IaC)
-  → Phase 7 (Guardrails) → Phase 8 (Evaluations)
+  → Phase 7 (Guardrails) → Phase 8 (Evaluations) → Phase 10 (Observability)
 
 Planned:
   Phase 9 (Web App)       ← DEFERRED (VM quota); demo runs locally
-      ├── Phase 10 (Observability) — can proceed without web app (local + Foundry tracing)
       ├── Phase 11 (Auth)          — requires Phase 9 (App Service for Easy Auth)
       └── Phase 12 (Network)       — requires Phase 9 (VNet integration needs App Service)
 ```

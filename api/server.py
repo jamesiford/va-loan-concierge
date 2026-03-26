@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from agents.orchestrator_agent import Orchestrator
+from api.telemetry import setup_telemetry, get_tracer
 
 load_dotenv()
 
@@ -50,6 +51,8 @@ async def lifespan(app: FastAPI):
     knowledge files are uploaded and indexed by Foundry. Subsequent starts
     are fast (existing agents and vector store are reused).
     """
+    setup_telemetry(app)
+
     logger.info("server: starting up — initializing orchestrator")
     orchestrator = Orchestrator()
 
@@ -179,16 +182,25 @@ async def chat(request: ChatRequest):
     logger.info("server: received query — %r", query[:120])
 
     async def event_stream():
-        try:
-            async for event in orchestrator.run(
-                query,
-                profile_id=request.profile_id,
-                conversation_id=request.conversation_id,
-            ):
-                yield _sse_frame(event)
-        except Exception as exc:
-            logger.exception("server: unhandled error during orchestration")
-            yield _error_frame(f"Server error: {exc}")
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            "chat_request",
+            attributes={
+                "chat.query": query[:500],
+                "chat.profile_id": request.profile_id or "none",
+                "chat.conversation_id": request.conversation_id or "new",
+            },
+        ):
+            try:
+                async for event in orchestrator.run(
+                    query,
+                    profile_id=request.profile_id,
+                    conversation_id=request.conversation_id,
+                ):
+                    yield _sse_frame(event)
+            except Exception as exc:
+                logger.exception("server: unhandled error during orchestration")
+                yield _error_frame(f"Server error: {exc}")
 
     return StreamingResponse(
         event_stream(),

@@ -189,3 +189,6 @@ output PROJECT_PRINCIPAL_ID string = aiProject.outputs.projectPrincipalId
 output AI_SERVICES_NAME string = aiServices.outputs.aiServicesName
 output STORAGE_ACCOUNT_NAME string = storage.outputs.storageAccountName
 output KNOWLEDGE_CONTAINER_NAME string = storage.outputs.knowledgeContainerName
+
+// Monitoring
+output APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.appInsightsConnectionString

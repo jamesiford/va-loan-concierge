@@ -17,6 +17,14 @@ azure-search-documents==11.7.0b2
 # ── HTTP (ARM management API calls for connection provisioning) ───────────────
 requests>=2.32.0
 
+# ── Observability (OpenTelemetry + Azure Monitor) ────────────────────────────
+opentelemetry-api>=1.25.0
+opentelemetry-sdk>=1.25.0
+opentelemetry-instrumentation-fastapi>=0.46b0
+opentelemetry-instrumentation-requests>=0.46b0
+opentelemetry-instrumentation-aiohttp-client>=0.46b0
+azure-monitor-opentelemetry-exporter>=1.0.0b27
+
 # ── Environment management ────────────────────────────────────────────────────
 python-dotenv>=1.0.0
 

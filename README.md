@@ -308,6 +308,7 @@ va-loan-concierge/
 │
 ├── api/
 │   ├── server.py                # FastAPI — POST /api/chat SSE endpoint
+│   ├── telemetry.py             # OpenTelemetry — Azure Monitor exporter, per-agent spans
 │   └── conversation_state.py    # In-memory HIL conversation state (TTL-based)
 │
 ├── mcp-server/                  # Azure Function App — custom MCP server
@@ -424,6 +425,7 @@ Three selectable profiles inject personalized context into every agent query:
 | Foundry SDK | `azure-ai-projects >= 2.0.1` (new-agent API) |
 | Auth | `azure-identity` (`DefaultAzureCredential`) |
 | MCP server | Azure Functions v2 (plain HTTP trigger) |
+| Observability | OpenTelemetry + Azure Monitor exporter → App Insights |
 | Infrastructure | Bicep + Azure Developer CLI (`azd`) |
 | Tests | `pytest` — 111 tests across all agents |
 
@@ -457,6 +459,7 @@ Three selectable profiles inject personalized context into every agent query:
 | Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams — hardened with HIL parity, graceful fallbacks, and isolated agent contexts |
 | Guardrails & content safety | Four defense layers: per-agent Foundry guardrails (tool call + PII scanning), content filter IaC, agent instruction rules, MCP input validation |
 | Agent evaluations | OpenAI Evals API targeting registered agents server-side — task adherence, groundedness, coherence, relevance; results visible in Foundry portal (Build > Evaluations) |
+| Observability | Two-layer tracing: Foundry portal (LLM I/O, tool calls, tokens) + App Insights (HTTP requests, agent timing, routing decisions) via OpenTelemetry |
 
 ---
 
@@ -474,17 +477,17 @@ Three selectable profiles inject personalized context into every agent query:
 | 6 | Infrastructure-as-Code | Full `azd up` / `azd down` flow — Bicep modules, hooks, 15 RBAC assignments; two manual portal steps (KB + calendar) |
 | 7 | Guardrails & Content Safety | Four defense layers: Foundry guardrails (per-agent, tool call scanning, PII), content filter IaC (Bicep raiPolicy), agent instruction safety rules, MCP input validation |
 | 8 | Agent Evaluations | OpenAI Evals API targeting registered agents server-side — task adherence, groundedness, coherence, relevance; results in Foundry portal (Build > Evaluations) |
+| 10 | Observability | Two-layer tracing: Foundry portal (automatic) + App Insights via OpenTelemetry (per-agent spans, routing timing, conversation audit), 90-day retention |
 
 ### Planned
 
 | Phase | Name | Goal | Key Changes |
 |---|---|---|---|
 | **9** | **Web App Deployment** | Deploy to Azure App Service (deferred — VM quota blocked) | `web-app.bicep` ready but not wired; demo runs locally for now |
-| **10** | **Observability** | End-to-end tracing in Azure portal + Foundry | OpenTelemetry + Azure Monitor exporter, per-agent trace spans, conversation audit logging, 90-day retention |
 | **11** | **Authentication** | Entra ID Easy Auth — system knows who the user is | App registration via hook, `X-MS-CLIENT-PRINCIPAL` header extraction, Work IQ Calendar delegated auth |
 | **12** | **Network Isolation** | VNet + private endpoints for financial institution compliance | New `network.bicep` (VNet, 3 subnets, NSG, 3 PEs, 3 DNS zones), disable public access on all backend services, Function App moves to shared B1 plan, MI-based storage auth |
 
-Phase 9 (Web App) is deferred due to subscription VM quota limits. Phases 10-12 can proceed independently once Phase 9 is unblocked. The demo runs locally in the meantime.
+Phase 9 (Web App) is deferred due to subscription VM quota limits. Phases 11-12 require Phase 9. The demo runs locally in the meantime.
 
 ---
 
