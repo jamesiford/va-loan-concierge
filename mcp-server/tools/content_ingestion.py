@@ -3,19 +3,19 @@ Content Understanding ingestion pipeline for VA mortgage news.
 
 This module runs inside the Azure Function App (mcp-server/), triggered either
 on a 4-hour timer or via HTTP POST /ingest for manual testing. It uses Azure
-Content Understanding (CU) — a GA Foundry Tool — to process RSS feed articles
-into structured JSON, then pushes the results to an Azure AI Search index that
-is wired into the Foundry IQ Knowledge Base as a second knowledge source.
+Content Understanding (CU) to process RSS feed articles into structured markdown
+files, then writes them to a blob storage container that is a Foundry IQ Knowledge
+Base source. Foundry IQ handles vectorization and indexing automatically.
 
 Pipeline flow:
-  RSS feeds ──► feedparser ──► CU (begin_analyze) ──► structured JSON
-      ──► Azure AI Search "va-loan-news" index
-          ──► Foundry IQ KB (second source, manual portal step)
+  RSS feeds ──► feedparser ──► CU (begin_analyze) ──► structured markdown
+      ──► blob container "news-articles"
+          ──► Foundry IQ KB (blob storage source, manual portal step)
               ──► Advisor Agent (existing — no code changes needed)
 
 Authentication:
   ContentUnderstandingClient: DefaultAzureCredential → AI Services endpoint
-  SearchClient: DefaultAzureCredential → Azure AI Search endpoint
+  BlobServiceClient: DefaultAzureCredential → Storage account endpoint
   (Both use the same managed identity / az login credential.)
 
 Required environment variables:
@@ -25,28 +25,31 @@ Required environment variables:
   CU_MINI_MODEL_DEPLOYMENT   — GPT-mini deployment for CU defaults (e.g. gpt-4.1-mini)
   CU_LARGE_EMBEDDING_DEPLOYMENT — Large embedding for CU defaults (e.g. text-embedding-3-large)
   CU_ANALYZER_NAME           — Name of the CU analyzer resource (e.g. vaMortgageNews)
-  CU_NEWS_INDEX_NAME         — Azure AI Search index for ingested articles (e.g. va-loan-news)
-  ADVISOR_SEARCH_ENDPOINT    — Azure AI Search service endpoint
+  CU_NEWS_BLOB_CONTAINER     — Blob container for news markdown files (e.g. news-articles)
+  STORAGE_ACCOUNT_ENDPOINT   — Storage account blob endpoint
+                               e.g. https://{storage-name}.blob.core.windows.net
 
 Key design decisions:
   - CU is batch/async, not real-time. Articles take seconds to analyze.
-  - Deduplication: SHA-256 of article URL as document ID; already-indexed
-    articles are skipped before CU analysis to save cost and latency.
+  - Deduplication: each article is written as a stable filename derived from a
+    SHA-256 hash of its URL. Blob existence check before CU analysis avoids
+    reprocessing articles already ingested.
+  - Foundry IQ handles all vectorization and search indexing automatically —
+    no manual embedding generation or search index management needed.
   - CU defaults must be set once per resource (3 model keys: gpt-4.1,
     gpt-4.1-mini, text-embedding-3-large). The analyzer itself uses only
     "completion" and "embedding" internal keys.
-  - The search index is push-based (no indexer). The Function App writes
-    directly via SearchClient.upload_documents().
-  - No blob storage for ingested articles — the search index IS the store.
+  - Output format is markdown — human-readable and optimally chunked for
+    Foundry IQ's document processing pipeline.
 """
 
 import hashlib
-import json
 import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+import json
 
 import feedparser
 from azure.ai.contentunderstanding import ContentUnderstandingClient
@@ -58,21 +61,7 @@ from azure.ai.contentunderstanding.models import (
 )
 from azure.core.credentials import TokenCredential
 from azure.identity import DefaultAzureCredential
-from azure.search.documents import SearchClient
-from azure.search.documents.indexes import SearchIndexClient
-from azure.search.documents.indexes.models import (
-    HnswAlgorithmConfiguration,
-    SearchField,
-    SearchFieldDataType,
-    SearchIndex,
-    SemanticConfiguration,
-    SemanticField,
-    SemanticPrioritizedFields,
-    SemanticSearch,
-    SimpleField,
-    VectorSearch,
-    VectorSearchProfile,
-)
+from azure.storage.blob import BlobServiceClient
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +224,10 @@ class NewsIngestionPipeline:
       1. ensure_analyzer()  — create CU analyzer if it doesn't exist (idempotent)
       2. fetch_feeds()      — parse all configured RSS feeds into article dicts
       3. analyze_article()  — submit each article to CU, get structured fields
-      4. push_to_index()    — upsert the structured doc into Azure AI Search
+      4. write_to_blob()    — write structured markdown to blob storage
+
+    Foundry IQ polls the blob container and automatically handles vectorization
+    and indexing — no manual embedding generation or search index management needed.
 
     Designed to run from either:
       - The 4-hour timer trigger (automated, uses ManagedIdentityCredential)
@@ -253,7 +245,7 @@ class NewsIngestionPipeline:
         # or fall back to DefaultAzureCredential for local dev / testing.
         self._credential = credential or DefaultAzureCredential()
         self._cu_client: ContentUnderstandingClient | None = None
-        self._search_client: SearchClient | None = None
+        self._blob_client: BlobServiceClient | None = None
 
     # ── Client Accessors (lazy init, cached per pipeline instance) ─────────────
 
@@ -268,15 +260,14 @@ class NewsIngestionPipeline:
             )
         return self._cu_client
 
-    def _get_search_client(self) -> SearchClient:
-        """Return a cached SearchClient pointed at the news index."""
-        if self._search_client is None:
-            self._search_client = SearchClient(
-                endpoint=os.environ["ADVISOR_SEARCH_ENDPOINT"],
-                index_name=os.environ["CU_NEWS_INDEX_NAME"],
+    def _get_blob_client(self) -> BlobServiceClient:
+        """Return a cached BlobServiceClient for the storage account."""
+        if self._blob_client is None:
+            self._blob_client = BlobServiceClient(
+                account_url=os.environ["STORAGE_ACCOUNT_ENDPOINT"],
                 credential=self._credential,
             )
-        return self._search_client
+        return self._blob_client
 
     # ── Analyzer Management ────────────────────────────────────────────────────
 
@@ -351,77 +342,6 @@ class NewsIngestionPipeline:
             "content_ingestion: analyzer '%s' created (status=%s)",
             analyzer_name, result.status,
         )
-
-    # ── Search Index Management ────────────────────────────────────────────────
-
-    def ensure_search_index(self) -> None:
-        """
-        Create the va-loan-news Azure AI Search index if it does not exist.
-        Idempotent — no-op if the index already exists.
-
-        The postprovision.ps1 hook also creates this index at deploy time, so
-        this method is primarily for local development and disaster recovery.
-        """
-        index_name = os.environ["CU_NEWS_INDEX_NAME"]
-        search_endpoint = os.environ["ADVISOR_SEARCH_ENDPOINT"]
-        index_client = SearchIndexClient(
-            endpoint=search_endpoint,
-            credential=self._credential,
-        )
-
-        existing_names = [idx.name for idx in index_client.list_indexes()]
-        if index_name in existing_names:
-            logger.info("content_ingestion: search index '%s' already exists", index_name)
-            return
-
-        logger.info("content_ingestion: creating search index '%s'", index_name)
-
-        # Index schema mirrors the CU field schema plus search-specific metadata.
-        # content_vector uses HNSW (1536 dims = text-embedding-3-small/-large compatible).
-        index = SearchIndex(
-            name=index_name,
-            fields=[
-                SimpleField(name="id",                    type=SearchFieldDataType.String,         key=True,  filterable=True),
-                SimpleField(name="url",                   type=SearchFieldDataType.String,         filterable=True),
-                SimpleField(name="source_name",           type=SearchFieldDataType.String,         filterable=True, facetable=True),
-                SimpleField(name="source_type",           type=SearchFieldDataType.String,         filterable=True, facetable=True),
-                SimpleField(name="ingested_at",           type=SearchFieldDataType.DateTimeOffset, filterable=True, sortable=True),
-                SearchField(name="title",                 type=SearchFieldDataType.String,         searchable=True),
-                SearchField(name="publish_date",          type=SearchFieldDataType.String,         searchable=False, filterable=True),
-                SearchField(name="summary",               type=SearchFieldDataType.String,         searchable=True),
-                SearchField(name="relevance_to_veterans", type=SearchFieldDataType.String,         searchable=True),
-                SearchField(name="rate_info",             type=SearchFieldDataType.String,         searchable=True),
-                SearchField(name="policy_update",         type=SearchFieldDataType.String,         searchable=True),
-                SearchField(
-                    name="content_vector",
-                    type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-                    searchable=True,
-                    vector_search_dimensions=1536,
-                    vector_search_profile_name="va-news-vector-profile",
-                ),
-            ],
-            vector_search=VectorSearch(
-                algorithms=[HnswAlgorithmConfiguration(name="va-news-hnsw")],
-                profiles=[VectorSearchProfile(
-                    name="va-news-vector-profile",
-                    algorithm_configuration_name="va-news-hnsw",
-                )],
-            ),
-            semantic_search=SemanticSearch(
-                configurations=[SemanticConfiguration(
-                    name="va-news-semantic",
-                    prioritized_fields=SemanticPrioritizedFields(
-                        title_field=SemanticField(field_name="title"),
-                        content_fields=[
-                            SemanticField(field_name="summary"),
-                            SemanticField(field_name="relevance_to_veterans"),
-                        ],
-                    ),
-                )]
-            ),
-        )
-        index_client.create_index(index)
-        logger.info("content_ingestion: search index '%s' created", index_name)
 
     # ── Feed Fetching ──────────────────────────────────────────────────────────
 
@@ -529,67 +449,115 @@ class NewsIngestionPipeline:
 
         return fields
 
-    # ── Search Index Push ──────────────────────────────────────────────────────
+    # ── Blob Storage Output ────────────────────────────────────────────────────
 
-    def _article_id(self, url: str) -> str:
+    def _blob_name(self, url: str) -> str:
         """
-        Stable, URL-safe document ID derived from the article URL.
-        SHA-256 truncated to 32 hex chars — collision probability negligible
-        for the expected volume of a few thousand articles.
+        Stable blob filename derived from the article URL.
+        SHA-256 truncated to 32 hex chars ensures uniqueness and safe filenames.
+        e.g. "a3f8c1d2e4b5f6a7b8c9d0e1f2a3b4c5.md"
         """
-        return hashlib.sha256(url.encode()).hexdigest()[:32]
+        return hashlib.sha256(url.encode()).hexdigest()[:32] + ".md"
 
-    def is_already_indexed(self, url: str) -> bool:
+    def is_already_ingested(self, url: str) -> bool:
         """
-        Return True if this article URL is already in the search index.
-        Uses a point-read by document ID (1 RU equivalent) for efficiency.
+        Return True if this article has already been written to blob storage.
+        Checks for blob existence by name — avoids re-processing and re-analyzing
+        articles that are already in the Foundry IQ knowledge source.
         """
-        search = self._get_search_client()
-        doc_id = self._article_id(url)
-        try:
-            search.get_document(key=doc_id)
-            return True
-        except Exception:
-            return False  # Document not found.
+        container_name = os.environ["CU_NEWS_BLOB_CONTAINER"]
+        blob_client = self._get_blob_client().get_blob_client(
+            container=container_name,
+            blob=self._blob_name(url),
+        )
+        return blob_client.exists()
 
-    def push_to_index(
+    def write_to_blob(
         self,
         article: dict[str, Any],
         cu_fields: dict[str, Any],
     ) -> None:
         """
-        Upsert one structured article into the Azure AI Search news index.
+        Write one structured article to blob storage as a markdown file.
+
+        Foundry IQ automatically picks up new blobs, chunks them, generates
+        embeddings, and makes them queryable via the knowledge_base_retrieve tool.
+        No manual vectorization or search index management needed.
+
+        The markdown format is human-readable (useful for demo presentations)
+        and optimally structured for Foundry IQ's document chunking pipeline.
 
         CU "extract" fields (Title, PublishDate) may return None if the content
         didn't contain those values — in that case we fall back to the original
         RSS feed metadata (article["title"], article["published"]).
-
-        Object fields (RateInfo, PolicyUpdate) are serialized to JSON strings
-        since the search index stores them as Edm.String for flexibility.
         """
-        search = self._get_search_client()
-
+        title = cu_fields.get("Title") or article["title"]
+        publish_date = cu_fields.get("PublishDate") or article["published"]
+        source_type = cu_fields.get("SourceType") or article["source_type"]
+        summary = cu_fields.get("Summary") or ""
+        relevance = cu_fields.get("RelevanceToVeterans") or ""
         rate_info = cu_fields.get("RateInfo")
         policy_update = cu_fields.get("PolicyUpdate")
 
-        document = {
-            "id":                    self._article_id(article["url"]),
-            "url":                   article["url"],
-            "source_name":           article["source_name"],
-            "source_type":           cu_fields.get("SourceType") or article["source_type"],
-            "ingested_at":           datetime.now(UTC).isoformat(),
-            "title":                 cu_fields.get("Title") or article["title"],
-            "publish_date":          cu_fields.get("PublishDate") or article["published"],
-            "summary":               cu_fields.get("Summary") or "",
-            "relevance_to_veterans": cu_fields.get("RelevanceToVeterans") or "",
-            "rate_info":             json.dumps(rate_info)    if rate_info    else "",
-            "policy_update":         json.dumps(policy_update) if policy_update else "",
-        }
+        # Build a structured markdown document.
+        # Frontmatter metadata helps Foundry IQ surface source/date in citations.
+        lines = [
+            f"# {title}",
+            "",
+            f"**Source:** {article['source_name']}  ",
+            f"**Type:** {source_type}  ",
+            f"**Published:** {publish_date}  ",
+            f"**Ingested:** {datetime.now(UTC).strftime('%Y-%m-%d')}  ",
+            f"**URL:** {article['url']}",
+            "",
+            "## Summary",
+            "",
+            summary,
+            "",
+            "## Relevance to Veterans",
+            "",
+            relevance,
+        ]
 
-        search.upload_documents(documents=[document])
+        # Append rate info section only if CU extracted rate data.
+        if rate_info and any(rate_info.get(k) for k in ("current_rate", "previous_rate", "direction")):
+            lines += [
+                "",
+                "## Rate Information",
+                "",
+                f"- **Current rate:** {rate_info.get('current_rate', 'N/A')}%",
+                f"- **Previous rate:** {rate_info.get('previous_rate', 'N/A')}%",
+                f"- **Direction:** {rate_info.get('direction', 'N/A')}",
+                f"- **Effective date:** {rate_info.get('effective_date', 'N/A')}",
+            ]
+
+        # Append policy update section only if CU extracted policy data.
+        if policy_update and any(policy_update.get(k) for k in ("affected_area", "change_description")):
+            lines += [
+                "",
+                "## Policy Update",
+                "",
+                f"- **Affected area:** {policy_update.get('affected_area', 'N/A')}",
+                f"- **Change:** {policy_update.get('change_description', 'N/A')}",
+                f"- **Effective date:** {policy_update.get('effective_date', 'N/A')}",
+            ]
+
+        markdown = "\n".join(lines)
+
+        container_name = os.environ["CU_NEWS_BLOB_CONTAINER"]
+        blob_name = self._blob_name(article["url"])
+        blob_client = self._get_blob_client().get_blob_client(
+            container=container_name,
+            blob=blob_name,
+        )
+        blob_client.upload_blob(
+            markdown.encode("utf-8"),
+            overwrite=True,
+            content_settings=None,
+        )
         logger.info(
-            "content_ingestion: indexed '%s' (%s)",
-            document["title"][:60], article["url"],
+            "content_ingestion: wrote blob '%s' for '%s'",
+            blob_name, title[:60],
         )
 
     # ── Full Pipeline ──────────────────────────────────────────────────────────
@@ -599,9 +567,9 @@ class NewsIngestionPipeline:
         Execute the full ingestion pipeline end-to-end.
 
         For each article across all configured feeds:
-          1. Skip if already indexed (deduplication by URL hash)
+          1. Skip if already ingested (blob existence check)
           2. Analyze with Content Understanding
-          3. Push structured result to Azure AI Search
+          3. Write structured markdown to blob storage
 
         Returns a summary dict: {fetched, analyzed, indexed, skipped, errors}
         """
@@ -613,9 +581,9 @@ class NewsIngestionPipeline:
         for article in articles:
             url = article["url"]
 
-            # Deduplication check — skip articles already in the index.
-            if self.is_already_indexed(url):
-                logger.debug("content_ingestion: already indexed, skipping: %s", url)
+            # Deduplication check — skip articles already written to blob.
+            if self.is_already_ingested(url):
+                logger.debug("content_ingestion: already ingested, skipping: %s", url)
                 stats["skipped"] += 1
                 continue
 
@@ -626,13 +594,13 @@ class NewsIngestionPipeline:
                 continue
             stats["analyzed"] += 1
 
-            # Push to search index.
+            # Write structured markdown to blob storage.
             try:
-                self.push_to_index(article, cu_fields)
+                self.write_to_blob(article, cu_fields)
                 stats["indexed"] += 1
             except Exception as exc:
                 logger.warning(
-                    "content_ingestion: push failed for '%s': %s", url, exc
+                    "content_ingestion: blob write failed for '%s': %s", url, exc
                 )
                 stats["errors"] += 1
 

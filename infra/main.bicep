@@ -202,7 +202,9 @@ output FUNCTION_APP_NAME string = functionApp.outputs.functionAppName
 output PROJECT_PRINCIPAL_ID string = aiProject.outputs.projectPrincipalId
 output AI_SERVICES_NAME string = aiServices.outputs.aiServicesName
 output STORAGE_ACCOUNT_NAME string = storage.outputs.storageAccountName
+output STORAGE_ACCOUNT_ENDPOINT string = storage.outputs.storageAccountEndpoint
 output KNOWLEDGE_CONTAINER_NAME string = storage.outputs.knowledgeContainerName
+output NEWS_CONTAINER_NAME string = storage.outputs.newsContainerName
 
 // Monitoring
 output APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.appInsightsConnectionString

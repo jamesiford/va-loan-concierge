@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// RBAC role assignments (15 total)
+// RBAC role assignments (14 total)
 // ---------------------------------------------------------------------------
 // All role assignments needed for the multi-agent demo to function.
 //
@@ -245,24 +245,13 @@ resource funcAppOpenAIUser 'Microsoft.Authorization/roleAssignments@2022-04-01' 
   }
 }
 
-// Function App → AI Search (push news articles to va-loan-news index)
-resource funcAppSearchContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(functionAppPrincipalId)) {
-  name: guid(searchId, functionAppPrincipalId, roles.searchIndexDataContributor)
+// Function App → Storage (blob contributor — write news markdown files to news-articles container)
+resource funcAppStorageBlobContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(functionAppPrincipalId)) {
+  name: guid(storageAccountId, functionAppPrincipalId, roles.storageBlobDataContributor)
   scope: resourceGroup()
   properties: {
     principalId: functionAppPrincipalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.searchIndexDataContributor)
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// Function App → AI Search (deduplication check — read existing articles)
-resource funcAppSearchReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(functionAppPrincipalId)) {
-  name: guid(searchId, functionAppPrincipalId, roles.searchIndexDataReader)
-  scope: resourceGroup()
-  properties: {
-    principalId: functionAppPrincipalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.searchIndexDataReader)
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.storageBlobDataContributor)
     principalType: 'ServicePrincipal'
   }
 }

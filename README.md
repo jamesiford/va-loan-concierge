@@ -184,27 +184,23 @@ After creation, verify the KB name in your `.env` matches:
 ADVISOR_KNOWLEDGE_BASE_NAME=kb-va-loan-guidelines
 ```
 
-### Manual Step 2: Add News Index as Second Knowledge Source (Phase 14)
+### Manual Step 2: Add News Articles as Second Knowledge Source (Phase 14)
 
-After `azd up`, the news ingestion pipeline is running and the `va-loan-news` search index has been created. To make the Advisor Agent aware of live VA mortgage news, add this index as a second knowledge source in the Foundry IQ Knowledge Base.
+After `azd up`, the news ingestion pipeline is running and the `news-articles` blob container has been created. To make the Advisor Agent aware of live VA mortgage news, add this container as a second knowledge source in the Foundry IQ Knowledge Base.
 
 1. Open the [Azure AI Foundry portal](https://ai.azure.com) → your project → **Knowledge**
 2. Select your existing knowledge base (`kb-va-loan-guidelines`)
-3. Under **Knowledge sources**, click **+ Add source** → **Azure AI Search index**:
+3. Under **Knowledge sources**, click **+ Add source** → **Azure Blob Storage**:
 
 | Field | Value |
 |---|---|
-| **Search service** | `srch-{env}` |
-| **Index** | `va-loan-news` |
-| **Source description** | `Live VA mortgage news — VA policy updates, CFPB regulatory changes, weekly rate surveys (Freddie Mac PMMS), and industry news. Ingested every 4 hours. Always cite the source name and publish date when referencing this source.` |
+| **Storage account** | `st{env}` |
+| **Container** | `news-articles` |
+| **Source description** | `Live VA mortgage news — VA policy updates, CFPB regulatory changes, weekly rate surveys (Freddie Mac PMMS), and industry news. Ingested every 4 hours as structured markdown files. Always cite the source name and publish date when referencing this source.` |
 
-4. Under **Retrieval settings** for the new source:
-   - **Output mode**: `Extractive data`
-   - **Reasoning effort**: `Low`
+4. Click **Save**
 
-5. Click **Save**
-
-After this step, the Advisor Agent will automatically query both the policy docs index and the live news index when answering questions about current rates or recent policy changes. No agent code changes are needed — Foundry IQ handles retrieval from all sources.
+After this step, the Advisor Agent will automatically query both the policy docs and the live news articles when answering questions about current rates or recent policy changes. Foundry IQ handles vectorization of new blobs automatically — no manual index management needed.
 
 > **Triggering a manual ingest:** To populate the news index immediately (without waiting for the 4-hour timer), call the manual trigger:
 > ```bash

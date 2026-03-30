@@ -30,6 +30,7 @@ azure-cosmos>=4.9.0
 
 # ── Content Understanding (Phase 14 — news ingestion pipeline) ────────────────
 azure-ai-contentunderstanding>=1.0.1
+azure-storage-blob>=12.25.0
 feedparser>=6.0.0
 
 # ── Environment management ────────────────────────────────────────────────────

@@ -3,7 +3,9 @@
 // ---------------------------------------------------------------------------
 // Used by:
 //   1. Function App — AzureWebJobsStorage runtime storage
-//   2. Foundry IQ Knowledge Base — blob container for knowledge source documents
+//   2. Foundry IQ Knowledge Base — blob containers for knowledge source documents
+//      knowledge-base   — VA guidelines, lender products, loan process FAQ (static)
+//      news-articles    — CU-ingested VA mortgage news markdown files (Phase 14)
 //
 // Storage names: max 24 chars, lowercase alphanumeric only, no hyphens.
 // We strip hyphens from environmentName and prefix with "st".
@@ -45,6 +47,16 @@ resource knowledgeContainer 'Microsoft.Storage/storageAccounts/blobServices/cont
   }
 }
 
+// Blob container for CU-ingested VA mortgage news markdown files (Phase 14)
+// Foundry IQ polls this container and auto-vectorizes new blobs as a KB source.
+resource newsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobServices
+  name: 'news-articles'
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
 // Blob container for Flex Consumption Function App deployment packages
 resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobServices
@@ -56,4 +68,6 @@ resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/con
 
 output storageAccountId string = storageAccount.id
 output storageAccountName string = storageAccount.name
+output storageAccountEndpoint string = storageAccount.properties.primaryEndpoints.blob
 output knowledgeContainerName string = knowledgeContainer.name
+output newsContainerName string = newsContainer.name

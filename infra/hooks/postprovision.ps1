@@ -22,7 +22,6 @@ Write-Host "=== postprovision: Setting up knowledge base and Foundry connections
 
 $PROJECT_RESOURCE_ID = (azd env get-value FOUNDRY_PROJECT_RESOURCE_ID 2>$null)
 $SEARCH_ENDPOINT = (azd env get-value ADVISOR_SEARCH_ENDPOINT 2>$null)
-$SEARCH_SERVICE_NAME = (azd env get-value SEARCH_SERVICE_NAME 2>$null)
 $MCP_TOOLS_ENDPOINT = (azd env get-value MCP_TOOLS_ENDPOINT 2>$null)
 $STORAGE_ACCOUNT_NAME = (azd env get-value STORAGE_ACCOUNT_NAME 2>$null)
 $AI_SERVICES_NAME = (azd env get-value AI_SERVICES_NAME 2>$null)
@@ -378,62 +377,6 @@ azd env set MCP_TOOLS_CONNECTION $MCP_TOOLS_CONNECTION
 # azd service deploy uses storage account keys which are blocked by policy.
 # Deploy via az CLI instead (uses Azure AD auth).
 
-# -- 10a. Create va-loan-news Azure AI Search index (Phase 14 — news ingestion) --
-# Push-based index: the Function App writes directly; no indexer or skillset needed.
-# Schema mirrors tools/content_ingestion.py:ensure_search_index().
-
-$CU_NEWS_INDEX_NAME = "va-loan-news"
-
-if ($SEARCH_ENDPOINT -and $SEARCH_TOKEN) {
-    Write-Host ""
-    Write-Host "=== Creating news search index '$CU_NEWS_INDEX_NAME' ==="
-
-    $newsIndexBody = @{
-        name   = $CU_NEWS_INDEX_NAME
-        fields = @(
-            @{ name = "id";                    type = "Edm.String";              key = $true;  searchable = $false; filterable = $true }
-            @{ name = "url";                   type = "Edm.String";              key = $false; searchable = $false; filterable = $true }
-            @{ name = "source_name";           type = "Edm.String";              key = $false; searchable = $false; filterable = $true;  facetable = $true }
-            @{ name = "source_type";           type = "Edm.String";              key = $false; searchable = $false; filterable = $true;  facetable = $true }
-            @{ name = "ingested_at";           type = "Edm.DateTimeOffset";      key = $false; searchable = $false; filterable = $true;  sortable = $true }
-            @{ name = "title";                 type = "Edm.String";              key = $false; searchable = $true }
-            @{ name = "publish_date";          type = "Edm.String";              key = $false; searchable = $false; filterable = $true }
-            @{ name = "summary";               type = "Edm.String";              key = $false; searchable = $true }
-            @{ name = "relevance_to_veterans"; type = "Edm.String";              key = $false; searchable = $true }
-            @{ name = "rate_info";             type = "Edm.String";              key = $false; searchable = $true }
-            @{ name = "policy_update";         type = "Edm.String";              key = $false; searchable = $true }
-            @{ name = "content_vector";        type = "Collection(Edm.Single)";  key = $false; searchable = $true;
-               dimensions = 1536; vectorSearchProfile = "va-news-vector-profile" }
-        )
-        vectorSearch = @{
-            algorithms = @(@{ name = "va-news-hnsw"; kind = "hnsw" })
-            profiles   = @(@{ name = "va-news-vector-profile"; algorithm = "va-news-hnsw" })
-        }
-        semantic = @{
-            configurations = @(@{
-                name = "va-news-semantic"
-                prioritizedFields = @{
-                    titleField   = @{ fieldName = "title" }
-                    contentFields = @(@{ fieldName = "summary" }, @{ fieldName = "relevance_to_veterans" })
-                }
-            })
-        }
-    } | ConvertTo-Json -Depth 10
-
-    $newsIndexUrl = "$SEARCH_ENDPOINT/indexes/$($CU_NEWS_INDEX_NAME)?api-version=2024-11-01-preview"
-    $newsResp = Invoke-RestMethod -Method Put -Uri $newsIndexUrl `
-        -Headers @{ "Authorization" = "Bearer $SEARCH_TOKEN"; "Content-Type" = "application/json" } `
-        -Body $newsIndexBody -ErrorAction SilentlyContinue
-
-    if ($newsResp) {
-        Write-Host "  News search index '$CU_NEWS_INDEX_NAME' created/updated"
-    } else {
-        Write-Host "  WARNING: Could not create news index — may already exist or token expired"
-    }
-} else {
-    Write-Host "  WARNING: SEARCH_ENDPOINT or SEARCH_TOKEN not set, skipping news index creation"
-}
-
 $FUNC_APP_NAME = (azd env get-value FUNCTION_APP_NAME 2>$null)
 
 if ($FUNC_APP_NAME -and $AZURE_RESOURCE_GROUP) {
@@ -490,12 +433,15 @@ $azdValues = [ordered]@{
     # CU_ENDPOINT uses the services.ai.azure.com format required by the CU SDK.
     # CU_COMPLETION_DEPLOYMENT mirrors FOUNDRY_MODEL_DEPLOYMENT by default, but is
     # kept as a separate variable — CU may need a different model than the agent pipeline.
+    # CU output goes to blob storage (news-articles container); Foundry IQ handles
+    # vectorization automatically when the container is added as a KB source.
     "CU_ENDPOINT"                           = (azd env get-value AI_SERVICES_ENDPOINT 2>$null)
     "CU_COMPLETION_DEPLOYMENT"              = (azd env get-value FOUNDRY_MODEL_DEPLOYMENT 2>$null)
     "CU_MINI_MODEL_DEPLOYMENT"              = "gpt-4.1-mini"
     "CU_LARGE_EMBEDDING_DEPLOYMENT"         = "text-embedding-3-large"
     "CU_ANALYZER_NAME"                      = "vaMortgageNews"
-    "CU_NEWS_INDEX_NAME"                    = "va-loan-news"
+    "CU_NEWS_BLOB_CONTAINER"                = "news-articles"
+    "STORAGE_ACCOUNT_ENDPOINT"              = (azd env get-value STORAGE_ACCOUNT_ENDPOINT 2>$null)
 }
 
 # SCHEDULER_CALENDAR_ENDPOINT and SCHEDULER_CALENDAR_CONNECTION are manual-only
