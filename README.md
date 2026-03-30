@@ -119,30 +119,62 @@ This creates the following Azure resources:
 | Resource | Name | Purpose |
 |---|---|---|
 | Resource Group | `rg-{env}` | Container for all resources |
-| AI Services | `ais-{env}` | Foundry + OpenAI models + connections (next-gen) |
-| AI Project | `proj-{env}` | Foundry project (agents live here) |
-| AI Search | `srch-{env}` | Knowledge base index + Foundry IQ KB for Advisor Agent |
+| AI Services | `ais-{env}` | Foundry + OpenAI models + connections (next-gen Foundry resource) |
+| AI Project | `proj-{env}` | Foundry project (all agents registered here) |
+| AI Search | `srch-{env}` | Vector search backend for Foundry IQ Knowledge Base |
 | Function App | `func-{env}` | Custom MCP server — Flex Consumption (FC1) |
-| Storage Account | `st{env}` | KB document blobs + Function App runtime |
-| Cosmos DB | `cosmos-{env}` | Persistent conversation state (Serverless NoSQL) |
-| App Insights | `appi-{env}` | Monitoring + diagnostics |
+| Storage Account | `st{env}` | Blob storage for KB docs + news articles + Function App runtime |
+| Cosmos DB | `cosmos-{env}` | Persistent HIL conversation state (Serverless NoSQL) |
+| App Insights | `appi-{env}` | Application-level observability (OpenTelemetry traces) |
 | Log Analytics | `log-{env}` | Required by App Insights |
 
-Plus RBAC role assignments (including Cosmos data-plane) and 2 RemoteTool project connections — all automated.
+**Blob containers** inside the Storage Account:
+
+| Container | Purpose |
+|---|---|
+| `loan-guidelines` | Static VA loan knowledge docs (`va_guidelines.md`, `lender_products.md`, `loan_process_faq.md`) — Foundry IQ KB source 1 |
+| `news-articles` | CU-ingested VA mortgage news markdown files — Foundry IQ KB source 2 (Phase 14) |
+| `deploymentpackage` | Flex Consumption Function App deployment packages (runtime) |
+
+**RBAC role assignments** (14 total — all automated by `infra/modules/rbac.bicep`):
+
+| Principal | Role | Resource | Why |
+|---|---|---|---|
+| AI Services MI | Search Index Data Reader | AI Search | KB queries via MCP |
+| AI Services MI | Search Index Data Contributor | AI Search | KB indexing and embedding updates |
+| Project MI | Search Index Data Reader | AI Search | KB queries via agent MCPTool |
+| Project MI | Search Index Data Contributor | AI Search | KB indexing |
+| Project MI | Cognitive Services OpenAI User | AI Services | Responses API calls for all agents |
+| Project MI | Cognitive Services User | AI Services | Agent management (data plane) |
+| Search MI | Cognitive Services OpenAI User | AI Services | Generates embeddings during KB indexing |
+| Search MI | Storage Blob Data Reader | Storage | Indexer reads docs from blob containers |
+| Current User | Cognitive Services OpenAI User | AI Services | Local dev (`az login` credential) |
+| Current User | Cognitive Services User | AI Services | Agent registration via `az login` |
+| Current User | Search Index Data Contributor | AI Search | `postprovision.ps1` creates KB index |
+| Current User | Storage Blob Data Contributor | Storage | `postprovision.ps1` uploads knowledge docs |
+| Current User | Contributor | Resource Group | ARM PUT for RemoteTool project connections |
+| Function App MI | Storage Blob Data Owner | Storage | Function App runtime (blob + queue access) |
+| Function App MI | Storage Queue Data Contributor | Storage | Functions runtime uses internal queues |
+| Function App MI | Cognitive Services User | AI Services | Content Understanding analyzer CRUD |
+| Function App MI | Cognitive Services OpenAI User | AI Services | CU analysis calls + model access |
+| Function App MI | Storage Blob Data Contributor | Storage | Writes news markdown to `news-articles` |
+
+> Cosmos DB RBAC uses a separate data-plane role system (`Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments`) with the built-in **Cosmos DB Data Contributor** role — not standard Azure RBAC.
 
 After provisioning completes, `azd up` automatically:
-1. Uploads the 3 knowledge documents to blob storage
-2. Creates an AI Search data source, index, skillset, and indexer (blob → embeddings → vector index)
+1. Uploads the 3 knowledge documents to the `loan-guidelines` blob container
+2. Creates an AI Search data source, index, skillset, and indexer (`loan-guidelines` blob → embeddings → vector index)
 3. Provisions RemoteTool connections for the KB MCP and custom MCP endpoints
 4. Deploys the MCP server to the Function App via `func azure functionapp publish`
-5. Writes `.env` from azd environment values
-6. Registers all 6 Foundry agents and uploads the workflow definition
+5. Syncs `tools/content_ingestion.py` → `mcp-server/tools/` before publishing (keeps the pipeline in sync)
+6. Writes `.env` from azd environment values
+7. Registers all 6 Foundry agents and uploads the workflow definition
 
-> **Updating knowledge sources:** To add or update documents, upload new files to the `knowledge-base` blob container and re-run the Search indexer. No redeployment needed.
+> **Updating knowledge sources:** To add or update documents, upload new files to the `loan-guidelines` blob container and re-run the Search indexer. No redeployment needed.
 
 ### Manual Step 1: Create Foundry IQ Knowledge Base
 
-The Advisor Agent requires a Foundry IQ Knowledge Base backed by the blob storage container that `azd up` populates. This must be created manually in the Foundry portal because the SDK for programmatic KB creation is in preview and unreliable.
+The Advisor Agent requires a Foundry IQ Knowledge Base backed by the blob storage containers that `azd up` populates. This must be created manually in the Foundry portal because the SDK for programmatic KB creation is in preview and unreliable.
 
 1. Open the [Azure AI Foundry portal](https://ai.azure.com) → your project (`proj-{env}`)
 2. Go to **Knowledge** (left sidebar) → **+ New knowledge base**
@@ -150,16 +182,17 @@ The Advisor Agent requires a Foundry IQ Knowledge Base backed by the blob storag
 
 | Field | Value |
 |---|---|
-| **Name** | `kb-va-loan-guidelines` |
-| **Description** | `VA Loan Concierge knowledge base for the Advisor Agent. Answers Veteran questions about VA loan eligibility, IRRRL qualification, funding fees, entitlement calculations, lender products, and the homebuying process with cited, grounded responses.` |
+| **Name** | `kb-va-loan-concierge` |
+| **Description** | `VA Loan Concierge knowledge base for the Advisor Agent. Covers VA loan eligibility, IRRRL qualification, funding fees, entitlement calculations, lender products, the homebuying process, and live VA mortgage news ingested every 4 hours.` |
 
-4. Under **Knowledge sources**, click **+ Add source** → **Azure Blob Storage**:
+4. Under **Knowledge sources**, click **+ Add source** → **Azure Blob Storage** (static loan guidelines):
 
 | Field | Value |
 |---|---|
+| **Name** | `ks-loan-guidelines` |
 | **Storage account** | `st{env}` |
-| **Container** | `knowledge-base` |
-| **Source description** | `VA loan knowledge base containing eligibility guidelines, lender product details (IRRRL, Cash-Out Refi, VA Jumbo, VA Renovation), and borrower FAQ covering process steps, myths, and edge cases. Sources: VA guidelines, Valor Home Lending products, loan process FAQ.` |
+| **Container** | `loan-guidelines` |
+| **Source description** | `Static VA loan knowledge: eligibility guidelines, lender product details (IRRRL, Cash-Out Refi, VA Jumbo, VA Renovation), and borrower FAQ covering process steps, myths, and edge cases.` |
 
 5. Under **Retrieval settings**:
 
@@ -181,26 +214,27 @@ The Advisor Agent requires a Foundry IQ Knowledge Base backed by the blob storag
 
 After creation, verify the KB name in your `.env` matches:
 ```
-ADVISOR_KNOWLEDGE_BASE_NAME=kb-va-loan-guidelines
+ADVISOR_KNOWLEDGE_BASE_NAME=kb-va-loan-concierge
 ```
 
 ### Manual Step 2: Add News Articles as Second Knowledge Source (Phase 14)
 
-After `azd up`, the news ingestion pipeline is running and the `news-articles` blob container has been created. To make the Advisor Agent aware of live VA mortgage news, add this container as a second knowledge source in the Foundry IQ Knowledge Base.
+After `azd up`, the news ingestion pipeline is running and the `news-articles` blob container has been created. To make the Advisor Agent aware of live VA mortgage news, add this container as a second knowledge source in the same Knowledge Base.
 
 1. Open the [Azure AI Foundry portal](https://ai.azure.com) → your project → **Knowledge**
-2. Select your existing knowledge base (`kb-va-loan-guidelines`)
+2. Select your knowledge base (`kb-va-loan-concierge`)
 3. Under **Knowledge sources**, click **+ Add source** → **Azure Blob Storage**:
 
 | Field | Value |
 |---|---|
+| **Name** | `ks-va-loan-news-articles` |
 | **Storage account** | `st{env}` |
 | **Container** | `news-articles` |
 | **Source description** | `Live VA mortgage news — VA policy updates, CFPB regulatory changes, weekly rate surveys (Freddie Mac PMMS), and industry news. Ingested every 4 hours as structured markdown files. Always cite the source name and publish date when referencing this source.` |
 
 4. Click **Save**
 
-After this step, the Advisor Agent will automatically query both the policy docs and the live news articles when answering questions about current rates or recent policy changes. Foundry IQ handles vectorization of new blobs automatically — no manual index management needed.
+After this step, the Advisor Agent will automatically query both the static loan guidelines and the live news articles when answering questions. Foundry IQ handles vectorization of new blobs automatically — no manual index management needed.
 
 > **Triggering a manual ingest:** To populate the news index immediately (without waiting for the 4-hour timer), call the manual trigger:
 > ```bash
@@ -482,7 +516,7 @@ The system is designed around **two distinct memory layers** that serve differen
 
 ### Content Understanding — VA Mortgage News Pipeline (Phase 14)
 
-An Azure Content Understanding (CU) pipeline ingests live VA mortgage news from RSS feeds every 4 hours, processes each article into structured fields, and pushes the results to a separate Azure AI Search index (`va-loan-news`). This index is wired into the Foundry IQ Knowledge Base as a second knowledge source, making the Advisor Agent's answers automatically more timely.
+An Azure Content Understanding (CU) pipeline ingests live VA mortgage news from RSS feeds every 4 hours, uses `gpt-4.1` to extract structured fields from each article, and writes the results as formatted markdown files to blob storage. Foundry IQ automatically vectorizes and indexes the blobs, making the Advisor Agent's answers continuously up to date with the latest VA mortgage news.
 
 **How it works:**
 1. An **Azure Functions timer trigger** (`ingest_timer`) runs every 4 hours
@@ -490,10 +524,28 @@ An Azure Content Understanding (CU) pipeline ingests live VA mortgage news from 
 3. Each article is submitted to a **custom CU analyzer** (`vaMortgageNews`) that uses `gpt-4.1` to extract 7 structured fields:
    - `Title`, `PublishDate` (extracted), `SourceType` (classified into 5 categories)
    - `Summary`, `RateInfo`, `PolicyUpdate`, `RelevanceToVeterans` (generated)
-4. Structured results are pushed directly to the `va-loan-news` search index (no indexer needed)
-5. The Advisor Agent queries both the policy docs index and the news index automatically
+4. Structured fields are rendered into a **human-readable markdown file** and written to the `news-articles` blob container
+5. **Foundry IQ automatically picks up new blobs**, chunks them, generates embeddings, and makes them queryable — no manual index management
+6. The Advisor Agent queries both the static loan guidelines and the live news articles in a single KB lookup
 
-**CU model requirements:** CU requires three deployed models on the AI Services account — `gpt-4.1`, `gpt-4.1-mini`, and `text-embedding-3-large`. All three are deployed by `azd up` via `ai-services.bicep`.
+**Why Content Understanding instead of Bing/Web Search?**
+
+A Bing or web search grounding tool would surface any webpage matching the query — including low-quality sources, competitor marketing, or outdated content. For a regulated financial services use case, that's a compliance and accuracy risk. Content Understanding gives us full control:
+
+| | Content Understanding (this approach) | Bing / Web Search |
+|---|---|---|
+| **Sources** | Hand-selected authoritative feeds (VA.gov, CFPB, Freddie Mac, MBA) | Any webpage on the internet |
+| **Content quality** | Pre-processed and validated by gpt-4.1 before indexing | Raw web content, variable quality |
+| **Structure** | Normalized fields (summary, rate info, policy change, veteran relevance) | Unstructured HTML |
+| **Compliance** | Auditable — every ingested article is a versioned blob | No audit trail |
+| **Citation accuracy** | Articles cite exact source name and publish date | URL-only citation, may be stale |
+| **Deduplication** | SHA-256 of URL — never re-analyzes the same article | No deduplication |
+| **Cost** | CU + gpt-4.1 per article, amortized over 4h batches | Per-query search cost |
+| **Latency** | Zero — content already indexed when user asks | Adds real-time search round-trip to every query |
+
+CU also demonstrates a Foundry-native capability (GA tool, same resource as the model deployments) rather than a generic web search that any application can add.
+
+**CU model requirements:** Three deployed models are required — `gpt-4.1`, `gpt-4.1-mini`, and `text-embedding-3-large`. All three are deployed by `azd up` via `ai-services.bicep`.
 
 **Manual trigger for testing:**
 ```bash
@@ -501,7 +553,7 @@ curl -X POST https://func-{env}.azurewebsites.net/ingest
 # Returns: {"fetched": N, "analyzed": N, "indexed": N, "skipped": N, "errors": N}
 ```
 
-**Deduplication:** SHA-256 of article URL is used as the document ID. Articles already in the index are skipped before CU analysis — second and subsequent runs complete in seconds.
+**Deduplication:** SHA-256 of the article URL determines the blob filename. If the blob already exists, the article is skipped before CU analysis — second and subsequent runs complete in seconds.
 
 **Code layout:**
 - `tools/content_ingestion.py` — `NewsIngestionPipeline` class (source of truth)
@@ -595,7 +647,7 @@ Three selectable profiles inject personalized context into every agent query:
 | 8 | Agent Evaluations | OpenAI Evals API targeting registered agents server-side — task adherence, groundedness, coherence, relevance; results in Foundry portal (Build > Evaluations) |
 | 10 | Observability | Two-layer tracing: Foundry portal (automatic) + App Insights via OpenTelemetry (per-agent spans, routing timing, conversation audit), 90-day retention |
 | 13 | Persistent State (Cosmos DB) | HIL conversations survive server restarts — Cosmos DB NoSQL Serverless with dual-backend (in-memory fallback for tests), async SDK, TTL-based expiry, data-plane RBAC |
-| 14 | Content Understanding | Live VA mortgage news ingestion — CU analyzer + timer-triggered Azure Function → `va-loan-news` AI Search index → Foundry IQ KB second source; `gpt-4.1` generates summaries, rate info, policy updates, veteran relevance; 4-hour timer + HTTP manual trigger |
+| 14 | Content Understanding | Live VA mortgage news ingestion — CU analyzer + timer-triggered Azure Function → `news-articles` blob container → Foundry IQ KB second source (auto-vectorized); `gpt-4.1` generates summaries, rate info, policy updates, veteran relevance; 4-hour timer + HTTP `/ingest` manual trigger |
 
 ### Up Next (independent — can start now)
 

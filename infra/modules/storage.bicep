@@ -4,7 +4,7 @@
 // Used by:
 //   1. Function App — AzureWebJobsStorage runtime storage
 //   2. Foundry IQ Knowledge Base — blob containers for knowledge source documents
-//      knowledge-base   — VA guidelines, lender products, loan process FAQ (static)
+//      loan-guidelines  — VA guidelines, lender products, loan process FAQ (static)
 //      news-articles    — CU-ingested VA mortgage news markdown files (Phase 14)
 //
 // Storage names: max 24 chars, lowercase alphanumeric only, no hyphens.
@@ -33,7 +33,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
-// Blob container for knowledge base source documents
+// Blob container for static VA loan knowledge documents (guidelines, products, FAQ)
 resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
   parent: storageAccount
   name: 'default'
@@ -41,7 +41,7 @@ resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01
 
 resource knowledgeContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobServices
-  name: 'knowledge-base'
+  name: 'loan-guidelines'
   properties: {
     publicAccess: 'None'
   }

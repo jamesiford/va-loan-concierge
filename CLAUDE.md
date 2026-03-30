@@ -871,7 +871,7 @@ values. The `azure-search-documents` SDK for programmatic KB creation is in prev
 was unreliable, so this step is portal-only.
 
 **Required env vars:**
-- `ADVISOR_KNOWLEDGE_BASE_NAME` — KB name in Azure AI Search (e.g. `kb-va-loan-guidelines`)
+- `ADVISOR_KNOWLEDGE_BASE_NAME` — KB name in Azure AI Search (e.g. `kb-va-loan-concierge`)
 - `ADVISOR_SEARCH_ENDPOINT` — search service URL (e.g. `https://search-va-loan-demo.search.windows.net`)
 - `FOUNDRY_PROJECT_RESOURCE_ID` — ARM resource ID of the Foundry project
 - `ADVISOR_MCP_CONNECTION` — name for the RemoteTool connection (e.g. `kb-va-loan-demo-mcp`)
@@ -1069,7 +1069,7 @@ This resolved vector search failures on the portal-created chunked index (`ks-va
    full Microsoft 365 Copilot license is required
 3. **ServiceIdentity limitations** — auto-created by Foundry publish flow; cannot be changed
    to MultiTenant; cannot generate client secrets for OAuth configuration
-4. **Two search indexes created** — `kb-va-loan-guidelines` (3 docs, original) and
+4. **Two search indexes created** — `kb-va-loan-concierge` (3 docs, original) and
    `ks-va-loan-guidelines-index` (21 docs, portal-created with chunking/vectors). The KB
    MCP endpoint uses the chunked index.
 5. **Embedding deployment can silently break** — if vectorization errors appear on the

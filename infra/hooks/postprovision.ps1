@@ -29,7 +29,7 @@ $EMBEDDING_MODEL = (azd env get-value EMBEDDING_MODEL_DEPLOYMENT 2>$null)
 if (-not $EMBEDDING_MODEL) { $EMBEDDING_MODEL = "text-embedding-3-small" }
 $AZURE_RESOURCE_GROUP = (azd env get-value AZURE_RESOURCE_GROUP 2>$null)
 $KNOWLEDGE_CONTAINER = (azd env get-value KNOWLEDGE_CONTAINER_NAME 2>$null)
-if (-not $KNOWLEDGE_CONTAINER) { $KNOWLEDGE_CONTAINER = "knowledge-base" }
+if (-not $KNOWLEDGE_CONTAINER) { $KNOWLEDGE_CONTAINER = "loan-guidelines" }
 
 if (-not $PROJECT_RESOURCE_ID) {
     Write-Error "FOUNDRY_PROJECT_RESOURCE_ID not set. Did azd provision complete?"
@@ -72,7 +72,7 @@ foreach ($doc in $docs) {
 
 # -- 2. Create AI Search data source (points at blob container) --
 
-$KB_NAME = "kb-va-loan-guidelines"
+$KB_NAME = "kb-va-loan-concierge"
 $DATASOURCE_NAME = "${KB_NAME}-datasource"
 Write-Host "Creating search data source: $DATASOURCE_NAME"
 
