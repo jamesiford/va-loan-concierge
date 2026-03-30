@@ -178,7 +178,7 @@ emits an `await_input` SSE event with `conversation_id` for resumption.
 
 The system uses **two distinct memory layers** that serve fundamentally different purposes:
 
-| | Session State (Phase 13) | Long-Term Memory (Phase 15 — planned) |
+| | Session State (Phase 13) | Long-Term Memory (Phase 16 — planned) |
 |---|---|---|
 | **What it is** | Cosmos DB conversation state | Foundry Memory Stores (preview) |
 | **Purpose** | Track orchestration flow within a single conversation | Remember facts about the borrower across conversations |
@@ -215,7 +215,7 @@ differently by design:
 | **HIL mechanism** | `await_input` SSE + `conversation_id` resume | `Question` nodes + `GotoAction` loops |
 | **State variables** | `ConversationState` dataclass (14 fields) | `Local.*` workflow variables |
 | **Persistence** | Explicit `save_conversation()` at 11 points | Automatic (workflow runtime manages scope) |
-| **Long-term memory** | Phase 15 planned (Foundry Memory Stores) | Same — Memory Stores are per-agent, shared across paths |
+| **Long-term memory** | Phase 16 planned (Foundry Memory Stores) | Same — Memory Stores are per-agent, shared across paths |
 
 Parity is maintained at the **behavioral level** — same routing logic, same HIL flows,
 same keywords, same agent capabilities. The state mechanism is intentionally different
@@ -223,7 +223,7 @@ because the two paths run in different execution environments. Adding Cosmos DB 
 workflow path would be redundant since the Foundry workflow runtime already persists
 variable state across turns automatically.
 
-Long-term memory (Phase 15) will be shared across both paths because Foundry Memory
+Long-term memory (Phase 16) will be shared across both paths because Foundry Memory
 Stores are attached to the agent definition, not the calling surface. A memory created
 during a React UI session will be available when the same Veteran uses Teams, and vice versa.
 
@@ -745,11 +745,12 @@ Workflow Agent. The workflow YAML has been hardened (simplified from 740 to ~289
 Power Fx fixes, conversationId isolation, graceful HIL fallbacks) and validated in the
 Foundry playground.
 
-**Completed:** Phases 1–8 + 10 + 13 (foundation, agents, MCP, Foundry IQ, workflow agent, IaC,
-guardrails, evaluations, observability, Cosmos DB state) + HIL orchestration + workflow hardening.
-**Next (independent, can start now):** Phase 14 (Content Understanding).
+**Completed:** Phases 1–8 + 10 + 13 + 14 (foundation, agents, MCP, Foundry IQ, workflow agent, IaC,
+guardrails, evaluations, observability, Cosmos DB state, content understanding / news ingestion)
++ HIL orchestration + workflow hardening.
+**Next (independent, can start now):** Phase 15 (Newsletter Agent — consumes Phase 14 news index).
 **Blocked on Phase 9 (VM quota):** Phase 11 (auth) → 12 (network isolation).
-**Blocked on Phase 11 (auth):** Phase 15 (Foundry Memory Stores — cross-session Veteran memory).
+**Blocked on Phase 11 (auth):** Phase 16 (Foundry Memory Stores — cross-session Veteran memory).
 **Validated (not a phase):** Orchestration patterns confirmed as Microsoft Agent Framework
 best practices — `agent_reference` + Responses API is the canonical pattern. ConnectedAgentTool
 (deprecated), A2APreviewTool (cross-system only), and Microsoft Agent Framework (overkill)
@@ -1454,18 +1455,18 @@ Items:
 
 ---
 
-### Phase 14. Content Understanding — VA Rate & News Intelligence Pipeline — PLANNED
+### Phase 14. Content Understanding — VA Rate & News Intelligence Pipeline — ✅ COMPLETE
 
 **Goal:** Add a Content Understanding ingestion pipeline that processes external content
 (VA rate changes, policy updates, mortgage industry news) into structured data, pushes it
 to Azure AI Search, and makes it queryable by the existing Advisor Agent via Foundry IQ.
 
 **What is Content Understanding:**
-Azure Content Understanding is a **GA Foundry Tool** (API `2025-11-01`, Python SDK
-`azure-ai-contentunderstanding>=1.0.1`) that uses generative AI to process unstructured
-content (documents, HTML, images, audio, video) into **user-defined structured output**.
-It runs on the same `Microsoft.CognitiveServices/accounts` (kind: `AIServices`) resource
-the project already uses.
+Azure Content Understanding is a **GA Foundry Tool** (Python SDK `azure-ai-contentunderstanding>=1.0.1`)
+that uses generative AI to process unstructured content (documents, HTML, images, audio, video)
+into **user-defined structured output**. It runs on the same
+`Microsoft.CognitiveServices/accounts` (kind: `AIServices`) resource the project already uses,
+authenticated via `DefaultAzureCredential` against the AI Services endpoint.
 
 Core concept: **Analyzers** — configurable processing units that define a field schema
 with three extraction methods per field:
@@ -1473,74 +1474,117 @@ with three extraction methods per field:
 - `generate` — AI-generated values (summaries, relevance assessments)
 - `classify` — categorize against an enum (source type, rate direction)
 
-**Why Content Understanding (not just more markdown files):**
-- Processes real HTML/web content into consistent structured output with confidence scores
-- Custom analyzers enforce schema consistency across diverse sources
-- Supports GA Python SDK with async client
-- Runs on the existing AI Services resource (no new infrastructure)
-- Content Understanding MCP server for direct agent access is "coming soon" (not yet available)
+**SDK pattern:** `ContentUnderstandingClient(endpoint, credential)` where endpoint is
+`https://{ais-name}.services.ai.azure.com/`. CU requires a one-time resource defaults setup
+(`update_defaults(model_deployments={"gpt-4.1": ..., "gpt-4.1-mini": ..., "text-embedding-3-large": ...})`
+with exact model-name keys) followed by analyzer creation with `models={"completion": gpt41, "embedding": large_embedding}`.
+Requires three deployed models: `gpt-4.1` (existing), `gpt-4.1-mini` (new), `text-embedding-3-large` (new).
+Both new models added to `ai-services.bicep` and deployed separately for the demo.
 
 **Architecture:**
 ```
-RSS/Web Feeds → Timer-Triggered Azure Function → Content Understanding (Custom Analyzer)
-    → Structured JSON → Azure AI Search Index → Foundry IQ KB → Advisor Agent (existing)
+RSS Feeds (VA.gov, CFPB, Freddie Mac, MBA)
+    │  every 4 hours
+    ▼
+mcp-server/ingest_trigger.py  (timer + HTTP Azure Functions)
+    ├── feedparser: fetch + normalize articles
+    └── tools/content_ingestion.py: NewsIngestionPipeline
+            ├── ensure_analyzer()  — create CU analyzer (idempotent)
+            ├── analyze_article()  — ContentUnderstandingClient.begin_analyze()
+            └── push_to_index()    — SearchClient.upload_documents()
+                        │
+                        ▼
+            Azure AI Search "va-loan-news" index
+            (separate from KB policy docs index)
+                        │
+                        ▼
+            Foundry IQ KB — second knowledge source
+                        │
+                        ▼
+            Advisor Agent (updated instructions)
 ```
 
-**Custom analyzer field schema (VA Mortgage News):**
-- `Title` (extract), `PublishDate` (extract)
-- `SourceType` (classify: rate_change | policy_update | industry_news | va_circular |
-  lender_bulletin)
+**Feed sources** (`tools/feed_sources.json`):
+- VA Home Loans — `benefits.va.gov/homeloans/rss.asp` (VA circulars)
+- CFPB Newsroom — `consumerfinance.gov/newsroom/feed/` (policy updates)
+- Freddie Mac PMMS — `freddiemac.com/feeds/pmms/pmms30.xml` (weekly 30yr rates)
+- MBA Mortgage News — `mba.org/news-and-research/newsroom/rss` (industry news)
+
+**Custom analyzer field schema** (`_ANALYZER_SCHEMA` in `tools/content_ingestion.py`):
+- `Title` (extract, string), `PublishDate` (extract, date)
+- `SourceType` (classify: rate_change | policy_update | industry_news | va_circular | lender_bulletin)
 - `Summary` (generate: 2-3 sentences for veterans/lenders)
-- `RateInfo` (generate: object — current_rate, previous_rate, effective_date, direction)
-- `PolicyUpdate` (generate: object — affected_area, change_description, effective_date)
+- `RateInfo` (generate, object: current_rate, previous_rate, effective_date, direction)
+- `PolicyUpdate` (generate, object: affected_area, change_description, effective_date)
 - `RelevanceToVeterans` (generate: one sentence)
 
-**Model deployments:**
-Content Understanding requires completion + embedding models. Options:
-- Add `gpt-4.1-mini` deployment (CU default for field extraction — cheaper than gpt-4.1)
-- Configure CU defaults to use existing `gpt-4.1` and `text-embedding-3-small` deployments
-  (avoids new deployments but uses more expensive model for extraction)
+**News search index** (`va-loan-news`): separate from the KB policy docs index.
+Fields: id (key), url, source_name, source_type, ingested_at, title, publish_date,
+summary, relevance_to_veterans, rate_info, policy_update, content_vector (1536-dim HNSW).
+Push-based (Function writes directly) — no indexer needed.
 
-**New files:**
-- `tools/content_ingestion.py` — Content Understanding client wrapper: create/manage
-  analyzer, analyze content, push structured output to search index
-- `tools/feed_sources.json` — RSS feed URLs and web source configuration
-- `mcp-server/ingest_trigger.py` — Timer-triggered Azure Function (every 4 hours):
-  fetch RSS feeds → download articles → CU analyze → push to search index
+**Deduplication:** SHA-256 of article URL as document ID. `is_already_indexed()` checks
+before CU analysis — skips if present. CU failures per-article are logged and skipped
+(don't fail the batch).
 
-**Files to modify:**
-- `infra/modules/ai-services.bicep` — (optional) add `gpt-4.1-mini` model deployment
-- `infra/hooks/postprovision.ps1` — create news search index + configure CU analyzer defaults
-- `agents/advisor_agent.py` — update `ADVISOR_INSTRUCTIONS` to reference news/rate sources,
-  include publish dates in citations for timely content
-- `requirements.txt` — add `azure-ai-contentunderstanding>=1.0.1`, `feedparser>=6.0.0`
-- `mcp-server/requirements.txt` — add same dependencies for Function App
-- `.env.example` — add `CU_ANALYZER_NAME=`, `NEWS_INDEX_NAME=`
+**Manual trigger:** `POST /ingest` HTTP function in `ingest_trigger.py` for testing
+without waiting 4 hours.
+
+**New env vars** (written by `postprovision.ps1`, also in `.env.example`):
+- `CU_ENDPOINT` — CU client endpoint (`services.ai.azure.com` format, from azd output `AI_SERVICES_ENDPOINT`)
+- `CU_COMPLETION_DEPLOYMENT` — set to same value as `FOUNDRY_MODEL_DEPLOYMENT` but independently configurable
+- `CU_MINI_MODEL_DEPLOYMENT` — `gpt-4.1-mini` (required by CU defaults even if not used by this analyzer)
+- `CU_LARGE_EMBEDDING_DEPLOYMENT` — `text-embedding-3-large` (required by CU defaults)
+- `CU_ANALYZER_NAME` — `vaMortgageNews` (no hyphens — CU analyzer IDs cannot contain `-`)
+- `CU_NEWS_INDEX_NAME` — `va-loan-news`
 
 **What NOT to do:**
-- Do NOT use CU as a real-time agent tool — it is async batch processing (seconds to minutes
-  latency), not suitable for synchronous agent calls
-- Do NOT bypass Foundry IQ — CU produces data, Foundry IQ provides agentic retrieval with
-  citations and permissions. CU is the producer; Foundry IQ is the consumer
-- Do NOT use the preview-only Pro mode (`2025-05-01-preview`) — multi-file analysis and
-  external KB features are not in the GA API
+- Do NOT use CU as a real-time agent tool — async batch processing only (seconds to minutes)
+- Do NOT bypass Foundry IQ — CU produces data, Foundry IQ provides agentic retrieval
+- Do NOT use the preview-only Pro mode (`2025-05-01-preview`)
+- Do NOT store ingested articles in blob — search index IS the persistent store
+
+**CU deployment notes (important for `azd up` reproducibility):**
+- `ensure_analyzer()` is called on each Function App startup (idempotent — skips if exists)
+- **Code sync pattern:** `tools/content_ingestion.py` is the source of truth. `postprovision.ps1`
+  copies it to `mcp-server/tools/` before `func azure functionapp publish` — never edit the copy.
+  This avoids the limitation that Azure Functions cannot import from parent directories.
+- `function_app.py` imports `ingest_trigger` (after `app` is defined) to register timer + HTTP
+  triggers on the shared FunctionApp instance (Azure Functions requires exactly one per worker)
+- Function App MI needs 4 roles: Cognitive Services User, Cognitive Services OpenAI User (on AI Services),
+  Search Index Data Contributor, Search Index Data Reader (on Search) — all added to `rbac.bicep`
+- Env var naming: all CU-specific vars are prefixed `CU_` to distinguish from the main agent pipeline vars
+- `CU_COMPLETION_DEPLOYMENT` and `FOUNDRY_MODEL_DEPLOYMENT` have the same value by default but are
+  separate variables — CU could be configured to use a different/cheaper model than the agent pipeline
 
 Items:
-- [ ] Create custom CU analyzer via Python SDK or REST API
-- [ ] Create `tools/content_ingestion.py` — CU client wrapper + search push
-- [ ] Create `tools/feed_sources.json` — RSS/web source configuration
-- [ ] Create `mcp-server/ingest_trigger.py` — timer-triggered ingestion function
-- [ ] Create news search index in `postprovision.ps1`
-- [ ] (Optional) Add `gpt-4.1-mini` model deployment to `ai-services.bicep`
-- [ ] Update `agents/advisor_agent.py` instructions for news/rate sources
-- [ ] Add dependencies to `requirements.txt` and `mcp-server/requirements.txt`
+- [x] Create `tools/content_ingestion.py` — `NewsIngestionPipeline` with CU + search push
+- [x] Create `tools/feed_sources.json` — 4 RSS feed sources
+- [x] Create `mcp-server/ingest_trigger.py` — timer (every 4h) + HTTP manual trigger
+- [x] Create `mcp-server/tools/` package — copy of content_ingestion.py + feed_sources.json for Function App
+- [x] Add `AI_SERVICES_ENDPOINT` output to `infra/main.bicep`
+- [x] Add `AI_SERVICES_ENDPOINT`, `CU_ANALYZER_NAME`, `NEWS_INDEX_NAME` to `postprovision.ps1` .env block
+- [x] Add `va-loan-news` search index creation to `postprovision.ps1` (step 10a)
+- [x] Update `agents/advisor_agent.py` — news source instructions + publish date citation rule
+- [x] Add `azure-ai-contentunderstanding>=1.0.1`, `feedparser>=6.0.0` to `requirements.txt`
+- [x] Add same + `azure-search-documents`, `azure-identity` to `mcp-server/requirements.txt`
+- [x] Update `.env.example` with new vars (`CU_ENDPOINT`, `CU_COMPLETION_DEPLOYMENT`, `CU_MINI_MODEL_DEPLOYMENT`, `CU_LARGE_EMBEDDING_DEPLOYMENT`, `CU_ANALYZER_NAME`, `CU_NEWS_INDEX_NAME`)
+- [x] Add `gpt-4.1-mini` and `text-embedding-3-large` deployments to `ai-services.bicep`
+- [x] Add Function App MI RBAC roles (Cognitive Services User, OpenAI User, Search Contributor, Search Reader) to `rbac.bicep`
+- [x] Deploy updated Function App — `ingest_timer` + `ingest_now` registered and working
+- [x] Test: POST /ingest → 25 articles fetched, analyzed, indexed (2026-03-30)
+- [x] Test: POST /ingest again → 25 skipped (deduplication working)
+- [x] Test: search `va-loan-news` index → titles, dates, summaries, source types all correct
+- [ ] Add `va-loan-news` as second knowledge source to Foundry IQ KB (manual portal step)
+- [ ] Test: ask Advisor "What are current VA rates?" → news source cited with date
+- [ ] Test: timer trigger fires on 4-hour schedule (next fire: midnight UTC +4h)
 - [ ] Test: manually ingest sample VA news article → verify structured output
 - [ ] Test: ask Advisor "What are current VA loan rates?" → verify news source cited
 - [ ] Test: timer trigger fires on schedule and ingests new content
 
 ---
 
-### Phase 15. Foundry Memory Stores — Semantic Long-Term Memory — PLANNED
+### Phase 16. Foundry Memory Stores — Semantic Long-Term Memory — PLANNED
 
 **Goal:** Add cross-conversation memory so the system remembers Veterans across sessions —
 prior interactions, preferences, loan history, and communication patterns. This complements
@@ -1565,7 +1609,7 @@ Marcus asks about refinancing. The orchestrator's session state manages the mult
 flow: pause for loan details → calculator runs → appointment booked for Thursday → user
 confirms → calendar event created. Session state expires after 10 minutes of inactivity.
 
-*Long-term memory captures (Phase 15 — automatic):*
+*Long-term memory captures (Phase 16 — automatic):*
 - "Marcus completed IRRRL refinance from 6.8% to 6.1% on existing VA loan"
 - "Marcus is funding-fee-exempt (10% disability rating)"
 - "Marcus prefers Thursday afternoon appointments"
@@ -1645,7 +1689,7 @@ specific Veteran across sessions.
 | `agents/advisor_agent.py` | (Optional) Enable Memory Store for loan-specific recall |
 | `profiles.py` | Update `_profile_context_block` to merge recalled memories with profile data |
 | `api/server.py` | Pass authenticated user ID to orchestrator (requires Phase 11) |
-| `CLAUDE.md` | Document Phase 15 |
+| `CLAUDE.md` | Document Phase 16 |
 
 Items:
 - [ ] Enable Memory Stores on Orchestrator agent in Foundry portal
@@ -1660,7 +1704,7 @@ Items:
 
 ### Phase Sequencing
 
-Phases 1–8 + 10 + 13 are complete. Phases 9–16 bring production readiness and new capabilities.
+Phases 1–8 + 10 + 13 + 14 are complete. Phases 9–12 + 15–16 bring production readiness and new capabilities.
 Each `azd up` leaves the system fully working.
 
 ```
@@ -1668,7 +1712,7 @@ Completed:
   Phase 1 (Foundation) → Phase 2 (Agents + HIL) → Phase 3 (Foundry IQ KB)
   → Phase 4 (MCP Server) → Phase 5 (Workflow Agent) → Phase 6 (IaC)
   → Phase 7 (Guardrails) → Phase 8 (Evaluations) → Phase 10 (Observability)
-  → Phase 13 (Cosmos DB State)
+  → Phase 13 (Cosmos DB State) → Phase 14 (Content Understanding)
 
 Planned (existing, blocked on Phase 9):
   Phase 9 (Web App)       ← DEFERRED (VM quota); demo runs locally
@@ -1676,19 +1720,20 @@ Planned (existing, blocked on Phase 9):
       └── Phase 12 (Network)       — requires Phase 9 (VNet integration needs App Service)
 
 Planned (independent — can start immediately):
-  Phase 14 (Content Understanding) ← new capability, enriches demo
+  Phase 15 (Newsletter Agent) ← new outbound agent, consumes Phase 14 news index
 
 Planned (requires Phase 11):
-  Phase 15 (Foundry Memory Stores) ← cross-session Veteran memory (requires auth)
+  Phase 16 (Foundry Memory Stores) ← cross-session Veteran memory (requires auth)
 
 Validated (not a numbered phase):
   Orchestration patterns confirmed as MAF best practices (2026-03-29).
   See Phase 5 "Why not ConnectedAgentTool / A2APreviewTool" for rationale.
 
 Dependency graph:
-  Phase 14 is independent of Phases 9–12.
+  Phases 14 and 15 are independent of Phases 9–12.
+  Phase 15 depends on Phase 14 (consumes the news search index).
   Phase 13 complements Phase 9 (Web App MI gets Cosmos RBAC when unblocked).
   Phase 14 extends Phase 3 (Foundry IQ KB gets new content source).
-  Phase 15 requires Phase 11 (Auth) — long-term memory needs authenticated user identity.
-  Phase 15 complements Phase 13 — session state (structured) + long-term memory (semantic).
+  Phase 16 requires Phase 11 (Auth) — long-term memory needs authenticated user identity.
+  Phase 16 complements Phase 13 — session state (structured) + long-term memory (semantic).
 ```

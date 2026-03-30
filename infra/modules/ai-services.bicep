@@ -16,6 +16,12 @@ param modelCapacity int = 30
 param embeddingModelName string = 'text-embedding-3-small'
 param embeddingModelVersion string = '1'
 param embeddingCapacity int = 30
+param miniModelName string = 'gpt-4.1-mini'
+param miniModelVersion string = '2025-04-14'
+param miniModelCapacity int = 20
+param largeEmbeddingModelName string = 'text-embedding-3-large'
+param largeEmbeddingModelVersion string = '1'
+param largeEmbeddingCapacity int = 20
 param searchId string
 param searchEndpoint string
 
@@ -110,6 +116,48 @@ resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
   }
   dependsOn: [
     modelDeployment
+  ]
+}
+
+// ── GPT-4.1-mini deployment (required by Content Understanding) ─────────────
+
+resource miniModelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-04-01-preview' = {
+  parent: aiServices
+  name: miniModelName
+  sku: {
+    name: 'Standard'
+    capacity: miniModelCapacity
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: miniModelName
+      version: miniModelVersion
+    }
+  }
+  dependsOn: [
+    embeddingDeployment
+  ]
+}
+
+// ── text-embedding-3-large deployment (required by Content Understanding) ────
+
+resource largeEmbeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-04-01-preview' = {
+  parent: aiServices
+  name: largeEmbeddingModelName
+  sku: {
+    name: 'Standard'
+    capacity: largeEmbeddingCapacity
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: largeEmbeddingModelName
+      version: largeEmbeddingModelVersion
+    }
+  }
+  dependsOn: [
+    miniModelDeployment
   ]
 }
 

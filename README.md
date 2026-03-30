@@ -177,7 +177,34 @@ After creation, verify the KB name in your `.env` matches:
 ADVISOR_KNOWLEDGE_BASE_NAME=kb-va-loan-guidelines
 ```
 
-### Manual Step 2: Configure Work IQ Calendar (Optional)
+### Manual Step 2: Add News Index as Second Knowledge Source (Phase 14)
+
+After `azd up`, the news ingestion pipeline is running and the `va-loan-news` search index has been created. To make the Advisor Agent aware of live VA mortgage news, add this index as a second knowledge source in the Foundry IQ Knowledge Base.
+
+1. Open the [Azure AI Foundry portal](https://ai.azure.com) → your project → **Knowledge**
+2. Select your existing knowledge base (`kb-va-loan-guidelines`)
+3. Under **Knowledge sources**, click **+ Add source** → **Azure AI Search index**:
+
+| Field | Value |
+|---|---|
+| **Search service** | `srch-{env}` |
+| **Index** | `va-loan-news` |
+| **Source description** | `Live VA mortgage news — VA policy updates, CFPB regulatory changes, weekly rate surveys (Freddie Mac PMMS), and industry news. Ingested every 4 hours. Always cite the source name and publish date when referencing this source.` |
+
+4. Under **Retrieval settings** for the new source:
+   - **Output mode**: `Extractive data`
+   - **Reasoning effort**: `Low`
+
+5. Click **Save**
+
+After this step, the Advisor Agent will automatically query both the policy docs index and the live news index when answering questions about current rates or recent policy changes. No agent code changes are needed — Foundry IQ handles retrieval from all sources.
+
+> **Triggering a manual ingest:** To populate the news index immediately (without waiting for the 4-hour timer), call the manual trigger:
+> ```bash
+> curl -X POST https://func-{env}.azurewebsites.net/ingest
+> ```
+
+### Manual Step 3: Configure Work IQ Calendar (Optional)
 
 The Calendar Agent requires a Work IQ Calendar connection for M365 calendar integration. This needs an M365 Copilot license and must be configured in the Foundry portal.
 
@@ -192,7 +219,7 @@ azd env set SCHEDULER_CALENDAR_CONNECTION <connection-name>
 azd hooks run postprovision    # re-writes .env and re-registers agents with calendar connection
 ```
 
-### Manual Step 3: Assign Guardrails to Agents (Recommended)
+### Manual Step 4: Assign Guardrails to Agents (Recommended)
 
 `azd up` creates two guardrail policies (`va-loan-advisor-guardrail` and `va-loan-tools-guardrail`) but they must be assigned to agents in the portal:
 
@@ -223,6 +250,25 @@ npm run dev
 ```
 
 Select a borrower profile (Marcus, Sarah, or James) and click a demo query button to see the full agent pipeline in action.
+
+### Troubleshooting: Storage Account and Cosmos DB Network Access
+
+Azure subscriptions with strict policy enforcement (managed sandboxes, corporate tenants) may automatically disable public network access on Storage Accounts and Cosmos DB accounts overnight or after certain policy compliance cycles. If `azd up` succeeds but the demo fails the next day with blob upload errors, Knowledge Base indexer failures, or Cosmos DB connection errors, verify that public access is still enabled:
+
+1. **Storage Account** (`st{env}` in the Azure portal):
+   - Navigate to **Security + networking** → **Networking**
+   - Confirm **Public network access** is set to **Enabled from all networks**
+   - If it was disabled by policy, re-enable it and re-run:
+     ```bash
+     azd hooks run postprovision   # re-uploads KB docs and re-runs indexer
+     ```
+
+2. **Cosmos DB** (`cosmos{env}` in the Azure portal):
+   - Navigate to **Settings** → **Networking**
+   - Confirm **Public network access** is set to **All networks**
+   - If disabled, re-enable it and restart the backend (`uvicorn api.server:app --reload --port 8000`)
+
+> **Note for Phase 12 (Network Isolation):** When network isolation is implemented, both resources will use private endpoints instead of public access. For now, public access is required for the demo to function.
 
 ### Troubleshooting: Cosmos DB Region Capacity
 
@@ -323,9 +369,17 @@ va-loan-concierge/
 │   ├── telemetry.py             # OpenTelemetry — Azure Monitor exporter, per-agent spans
 │   └── conversation_state.py    # Persistent HIL state (Cosmos DB or in-memory fallback)
 │
+├── tools/                       # Shared pipeline utilities (used by backend + Function App)
+│   ├── content_ingestion.py     # NewsIngestionPipeline — CU analyzer + search push (Phase 14)
+│   └── feed_sources.json        # RSS feed configs (VA, CFPB, Freddie Mac, MBA)
+│
 ├── mcp-server/                  # Azure Function App — custom MCP server
-│   ├── function_app.py          # HTTP trigger — MCP JSON-RPC handler
+│   ├── function_app.py          # Entry point — MCP JSON-RPC handler + imports ingest_trigger
 │   ├── server.py                # Tool implementations + inputSchema definitions
+│   ├── ingest_trigger.py        # Timer (4h) + HTTP /ingest triggers (Phase 14)
+│   ├── tools/                   # Copy of repo-root tools/ — synced by postprovision.ps1
+│   │   ├── content_ingestion.py #   (do not edit here — edit tools/ at repo root)
+│   │   └── feed_sources.json
 │   ├── host.json                # routePrefix: "" → endpoint at /mcp
 │   └── requirements.txt
 │
@@ -417,11 +471,42 @@ The system is designed around **two distinct memory layers** that serve differen
 | Layer | Technology | Purpose | Scope |
 |---|---|---|---|
 | **Session State** | Cosmos DB (Phase 13) | Track orchestration flow within a conversation | Single session, 10-min TTL |
-| **Long-Term Memory** | Foundry Memory Stores (Phase 15 — planned) | Remember Veterans across conversations | Cross-session, persistent |
+| **Long-Term Memory** | Foundry Memory Stores (Phase 16 — planned) | Remember Veterans across conversations | Cross-session, persistent |
 
 **Session state** is structured and deterministic — routing flags, retry counts, pending actions, accumulated agent results. The Python orchestrator writes state at 11 mutation points; the Workflow Agent uses built-in workflow runtime variables. Both paths maintain behavioral parity.
 
 **Long-term memory** (planned) will use Foundry Memory Stores — a preview feature where the LLM automatically extracts and recalls semantic facts across conversations. Example: after Marcus refinances via IRRRL, the system remembers his rate, fee exemption status, and scheduling preferences. When he returns weeks later for a cash-out question, his context is already loaded — no re-collection needed. Memory Stores are per-agent and shared across both orchestration paths (React UI and Teams).
+
+### Content Understanding — VA Mortgage News Pipeline (Phase 14)
+
+An Azure Content Understanding (CU) pipeline ingests live VA mortgage news from RSS feeds every 4 hours, processes each article into structured fields, and pushes the results to a separate Azure AI Search index (`va-loan-news`). This index is wired into the Foundry IQ Knowledge Base as a second knowledge source, making the Advisor Agent's answers automatically more timely.
+
+**How it works:**
+1. An **Azure Functions timer trigger** (`ingest_timer`) runs every 4 hours
+2. `feedparser` fetches articles from 4 configured RSS feeds (VA Home Loans, CFPB, Freddie Mac PMMS, MBA Mortgage News)
+3. Each article is submitted to a **custom CU analyzer** (`vaMortgageNews`) that uses `gpt-4.1` to extract 7 structured fields:
+   - `Title`, `PublishDate` (extracted), `SourceType` (classified into 5 categories)
+   - `Summary`, `RateInfo`, `PolicyUpdate`, `RelevanceToVeterans` (generated)
+4. Structured results are pushed directly to the `va-loan-news` search index (no indexer needed)
+5. The Advisor Agent queries both the policy docs index and the news index automatically
+
+**CU model requirements:** CU requires three deployed models on the AI Services account — `gpt-4.1`, `gpt-4.1-mini`, and `text-embedding-3-large`. All three are deployed by `azd up` via `ai-services.bicep`.
+
+**Manual trigger for testing:**
+```bash
+curl -X POST https://func-{env}.azurewebsites.net/ingest
+# Returns: {"fetched": N, "analyzed": N, "indexed": N, "skipped": N, "errors": N}
+```
+
+**Deduplication:** SHA-256 of article URL is used as the document ID. Articles already in the index are skipped before CU analysis — second and subsequent runs complete in seconds.
+
+**Code layout:**
+- `tools/content_ingestion.py` — `NewsIngestionPipeline` class (source of truth)
+- `tools/feed_sources.json` — RSS feed configurations
+- `mcp-server/ingest_trigger.py` — Azure Function timer + HTTP triggers
+- `mcp-server/tools/` — copy of the above, synced by `postprovision.ps1` before deploy
+
+> **Keeping `mcp-server/tools/` in sync:** The Function App cannot import from parent directories, so `tools/content_ingestion.py` is copied to `mcp-server/tools/` automatically by `postprovision.ps1` before each Function App publish. Never edit `mcp-server/tools/` directly — edit `tools/content_ingestion.py` at the repo root instead. Running `azd up` keeps everything synchronized.
 
 ### Work IQ Calendar — M365 Integration (Calendar Agent)
 
@@ -487,6 +572,7 @@ Three selectable profiles inject personalized context into every agent query:
 | Agent evaluations | OpenAI Evals API targeting registered agents server-side — task adherence, groundedness, coherence, relevance; results visible in Foundry portal (Build > Evaluations) |
 | Observability | Two-layer tracing: Foundry portal (LLM I/O, tool calls, tokens) + App Insights (HTTP requests, agent timing, routing decisions) via OpenTelemetry |
 | Agent Framework best practices | Orchestration uses `agent_reference` + Responses API — the canonical Microsoft Agent Framework pattern. ConnectedAgentTool (deprecated, classic API), A2APreviewTool (cross-system only), and Microsoft Agent Framework OSS (overkill for sequential pipeline) intentionally not used |
+| Content Understanding | Azure Content Understanding GA Foundry Tool — custom CU analyzer extracts structured fields from RSS articles using `gpt-4.1`; timer-triggered Azure Function ingests VA mortgage news every 4 hours; Advisor cites live news with dates alongside static KB sources |
 
 ---
 
@@ -506,12 +592,13 @@ Three selectable profiles inject personalized context into every agent query:
 | 8 | Agent Evaluations | OpenAI Evals API targeting registered agents server-side — task adherence, groundedness, coherence, relevance; results in Foundry portal (Build > Evaluations) |
 | 10 | Observability | Two-layer tracing: Foundry portal (automatic) + App Insights via OpenTelemetry (per-agent spans, routing timing, conversation audit), 90-day retention |
 | 13 | Persistent State (Cosmos DB) | HIL conversations survive server restarts — Cosmos DB NoSQL Serverless with dual-backend (in-memory fallback for tests), async SDK, TTL-based expiry, data-plane RBAC |
+| 14 | Content Understanding | Live VA mortgage news ingestion — CU analyzer + timer-triggered Azure Function → `va-loan-news` AI Search index → Foundry IQ KB second source; `gpt-4.1` generates summaries, rate info, policy updates, veteran relevance; 4-hour timer + HTTP manual trigger |
 
-### Up Next
+### Up Next (independent — can start now)
 
 | Phase | Name | Goal | Key Changes |
 |---|---|---|---|
-| **14** | **Content Understanding** | Ingest VA rate changes and news into the knowledge base | GA Foundry Tool — custom analyzer + timer-triggered Azure Function → AI Search → Foundry IQ KB |
+| **15** | **Newsletter Agent** | On-demand email summaries of VA news to Veterans or loan officers | New outbound agent — Azure Communication Services email via MCP tool; orchestrator routes "send me the latest" queries; wired into existing `va-loan-news` index from Phase 14 |
 
 ### Planned (blocked on Phase 9)
 
@@ -520,7 +607,7 @@ Three selectable profiles inject personalized context into every agent query:
 | **9** | **Web App Deployment** | Deploy to Azure App Service | Subscription VM quota is 0 — demo runs locally |
 | **11** | **Authentication** | Entra ID Easy Auth | Requires Phase 9 (App Service) |
 | **12** | **Network Isolation** | VNet + private endpoints | Requires Phase 9 (VNet integration) |
-| **15** | **Foundry Memory Stores** | Cross-session Veteran memory — returning borrowers get personalized context | Requires Phase 11 (Auth) — needs authenticated user identity to associate memories |
+| **16** | **Foundry Memory Stores** | Cross-session Veteran memory — returning borrowers get personalized context | Requires Phase 11 (Auth) — needs authenticated user identity to associate memories |
 
 ---
 

@@ -2,3 +2,9 @@
 
 # Azure Functions runtime
 azure-functions>=1.21.0
+
+# Content Understanding ingestion pipeline (Phase 14)
+azure-ai-contentunderstanding>=1.0.1
+azure-search-documents==11.7.0b2
+azure-identity>=1.25.0
+feedparser>=6.0.0

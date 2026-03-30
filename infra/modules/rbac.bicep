@@ -223,6 +223,50 @@ resource funcAppStorageQueue 'Microsoft.Authorization/roleAssignments@2022-04-01
   }
 }
 
+// Function App → AI Services (Content Understanding defaults + analyzer CRUD)
+resource funcAppCognitiveUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(functionAppPrincipalId)) {
+  name: guid(aiServicesId, functionAppPrincipalId, roles.cognitiveServicesUser)
+  scope: resourceGroup()
+  properties: {
+    principalId: functionAppPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.cognitiveServicesUser)
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Function App → AI Services (OpenAI User — CU analysis calls + model access)
+resource funcAppOpenAIUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(functionAppPrincipalId)) {
+  name: guid(aiServicesId, functionAppPrincipalId, roles.cognitiveServicesOpenAIUser)
+  scope: resourceGroup()
+  properties: {
+    principalId: functionAppPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.cognitiveServicesOpenAIUser)
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Function App → AI Search (push news articles to va-loan-news index)
+resource funcAppSearchContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(functionAppPrincipalId)) {
+  name: guid(searchId, functionAppPrincipalId, roles.searchIndexDataContributor)
+  scope: resourceGroup()
+  properties: {
+    principalId: functionAppPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.searchIndexDataContributor)
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Function App → AI Search (deduplication check — read existing articles)
+resource funcAppSearchReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(functionAppPrincipalId)) {
+  name: guid(searchId, functionAppPrincipalId, roles.searchIndexDataReader)
+  scope: resourceGroup()
+  properties: {
+    principalId: functionAppPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.searchIndexDataReader)
+    principalType: 'ServicePrincipal'
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // COSMOS DB DATA-PLANE RBAC
 // ═══════════════════════════════════════════════════════════════════════════

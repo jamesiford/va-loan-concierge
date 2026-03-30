@@ -209,3 +209,6 @@ output APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.appInsi
 
 // Cosmos DB (conversation state)
 output COSMOS_ENDPOINT string = cosmosDb.outputs.cosmosEndpoint
+
+// Content Understanding (Phase 14)
+output AI_SERVICES_ENDPOINT string = aiServices.outputs.aiServicesEndpoint

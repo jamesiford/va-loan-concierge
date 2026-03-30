@@ -1,0 +1,26 @@
+[
+  {
+    "name": "VA Home Loans",
+    "url": "https://www.benefits.va.gov/homeloans/rss.asp",
+    "source_type": "va_circular",
+    "mime_type": "application/rss+xml"
+  },
+  {
+    "name": "CFPB Newsroom",
+    "url": "https://www.consumerfinance.gov/about-us/newsroom/feed/",
+    "source_type": "policy_update",
+    "mime_type": "application/rss+xml"
+  },
+  {
+    "name": "Freddie Mac PMMS",
+    "url": "https://www.freddiemac.com/feeds/pmms/pmms30.xml",
+    "source_type": "rate_change",
+    "mime_type": "application/rss+xml"
+  },
+  {
+    "name": "MBA Mortgage News",
+    "url": "https://www.mba.org/news-and-research/newsroom/rss",
+    "source_type": "industry_news",
+    "mime_type": "application/rss+xml"
+  }
+]

@@ -378,11 +378,80 @@ azd env set MCP_TOOLS_CONNECTION $MCP_TOOLS_CONNECTION
 # azd service deploy uses storage account keys which are blocked by policy.
 # Deploy via az CLI instead (uses Azure AD auth).
 
+# -- 10a. Create va-loan-news Azure AI Search index (Phase 14 — news ingestion) --
+# Push-based index: the Function App writes directly; no indexer or skillset needed.
+# Schema mirrors tools/content_ingestion.py:ensure_search_index().
+
+$CU_NEWS_INDEX_NAME = "va-loan-news"
+
+if ($SEARCH_ENDPOINT -and $SEARCH_TOKEN) {
+    Write-Host ""
+    Write-Host "=== Creating news search index '$CU_NEWS_INDEX_NAME' ==="
+
+    $newsIndexBody = @{
+        name   = $CU_NEWS_INDEX_NAME
+        fields = @(
+            @{ name = "id";                    type = "Edm.String";              key = $true;  searchable = $false; filterable = $true }
+            @{ name = "url";                   type = "Edm.String";              key = $false; searchable = $false; filterable = $true }
+            @{ name = "source_name";           type = "Edm.String";              key = $false; searchable = $false; filterable = $true;  facetable = $true }
+            @{ name = "source_type";           type = "Edm.String";              key = $false; searchable = $false; filterable = $true;  facetable = $true }
+            @{ name = "ingested_at";           type = "Edm.DateTimeOffset";      key = $false; searchable = $false; filterable = $true;  sortable = $true }
+            @{ name = "title";                 type = "Edm.String";              key = $false; searchable = $true }
+            @{ name = "publish_date";          type = "Edm.String";              key = $false; searchable = $false; filterable = $true }
+            @{ name = "summary";               type = "Edm.String";              key = $false; searchable = $true }
+            @{ name = "relevance_to_veterans"; type = "Edm.String";              key = $false; searchable = $true }
+            @{ name = "rate_info";             type = "Edm.String";              key = $false; searchable = $true }
+            @{ name = "policy_update";         type = "Edm.String";              key = $false; searchable = $true }
+            @{ name = "content_vector";        type = "Collection(Edm.Single)";  key = $false; searchable = $true;
+               dimensions = 1536; vectorSearchProfile = "va-news-vector-profile" }
+        )
+        vectorSearch = @{
+            algorithms = @(@{ name = "va-news-hnsw"; kind = "hnsw" })
+            profiles   = @(@{ name = "va-news-vector-profile"; algorithm = "va-news-hnsw" })
+        }
+        semantic = @{
+            configurations = @(@{
+                name = "va-news-semantic"
+                prioritizedFields = @{
+                    titleField   = @{ fieldName = "title" }
+                    contentFields = @(@{ fieldName = "summary" }, @{ fieldName = "relevance_to_veterans" })
+                }
+            })
+        }
+    } | ConvertTo-Json -Depth 10
+
+    $newsIndexUrl = "$SEARCH_ENDPOINT/indexes/$($CU_NEWS_INDEX_NAME)?api-version=2024-11-01-preview"
+    $newsResp = Invoke-RestMethod -Method Put -Uri $newsIndexUrl `
+        -Headers @{ "Authorization" = "Bearer $SEARCH_TOKEN"; "Content-Type" = "application/json" } `
+        -Body $newsIndexBody -ErrorAction SilentlyContinue
+
+    if ($newsResp) {
+        Write-Host "  News search index '$CU_NEWS_INDEX_NAME' created/updated"
+    } else {
+        Write-Host "  WARNING: Could not create news index — may already exist or token expired"
+    }
+} else {
+    Write-Host "  WARNING: SEARCH_ENDPOINT or SEARCH_TOKEN not set, skipping news index creation"
+}
+
 $FUNC_APP_NAME = (azd env get-value FUNCTION_APP_NAME 2>$null)
 
 if ($FUNC_APP_NAME -and $AZURE_RESOURCE_GROUP) {
     Write-Host ""
     Write-Host "=== Deploying MCP server to $FUNC_APP_NAME ==="
+
+    # Sync the content ingestion pipeline files from the repo root into the
+    # mcp-server/tools/ package before publishing.  The Function App cannot
+    # import from parent directories, so these files must live inside mcp-server/.
+    # This copy step is the single source of truth — edit tools/ at the root,
+    # never edit mcp-server/tools/ directly.
+    Write-Host "  Syncing tools/content_ingestion.py → mcp-server/tools/"
+    New-Item -ItemType Directory -Force -Path "mcp-server/tools" | Out-Null
+    Copy-Item "tools/content_ingestion.py" "mcp-server/tools/content_ingestion.py" -Force
+    Copy-Item "tools/feed_sources.json"    "mcp-server/tools/feed_sources.json"    -Force
+    if (-not (Test-Path "mcp-server/tools/__init__.py")) {
+        "" | Out-File "mcp-server/tools/__init__.py" -Encoding utf8
+    }
 
     Push-Location mcp-server
     func azure functionapp publish $FUNC_APP_NAME --python
@@ -417,6 +486,16 @@ $azdValues = [ordered]@{
     "EMBEDDING_MODEL_DEPLOYMENT"            = $EMBEDDING_MODEL
     "APPLICATIONINSIGHTS_CONNECTION_STRING"  = (azd env get-value APPLICATIONINSIGHTS_CONNECTION_STRING 2>$null)
     "COSMOS_ENDPOINT"                       = (azd env get-value COSMOS_ENDPOINT 2>$null)
+    # ── Content Understanding (Phase 14) ─────────────────────────────────────
+    # CU_ENDPOINT uses the services.ai.azure.com format required by the CU SDK.
+    # CU_COMPLETION_DEPLOYMENT mirrors FOUNDRY_MODEL_DEPLOYMENT by default, but is
+    # kept as a separate variable — CU may need a different model than the agent pipeline.
+    "CU_ENDPOINT"                           = (azd env get-value AI_SERVICES_ENDPOINT 2>$null)
+    "CU_COMPLETION_DEPLOYMENT"              = (azd env get-value FOUNDRY_MODEL_DEPLOYMENT 2>$null)
+    "CU_MINI_MODEL_DEPLOYMENT"              = "gpt-4.1-mini"
+    "CU_LARGE_EMBEDDING_DEPLOYMENT"         = "text-embedding-3-large"
+    "CU_ANALYZER_NAME"                      = "vaMortgageNews"
+    "CU_NEWS_INDEX_NAME"                    = "va-loan-news"
 }
 
 # SCHEDULER_CALENDAR_ENDPOINT and SCHEDULER_CALENDAR_CONNECTION are manual-only
