@@ -20,6 +20,8 @@ param storageAccountId string
 param projectId string
 param userPrincipalId string = ''
 param functionAppPrincipalId string = ''
+param cosmosAccountId string = ''
+param cosmosAccountName string = ''
 
 // ── Well-known role definition IDs ──────────────────────────────────────────
 
@@ -218,6 +220,30 @@ resource funcAppStorageQueue 'Microsoft.Authorization/roleAssignments@2022-04-01
     principalId: functionAppPrincipalId
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.storageQueueDataContributor)
     principalType: 'ServicePrincipal'
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COSMOS DB DATA-PLANE RBAC
+// ═══════════════════════════════════════════════════════════════════════════
+// Cosmos DB uses its own data-plane role system — NOT Microsoft.Authorization.
+// Resource type: Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments
+// Role: Cosmos DB Built-in Data Contributor (read + write + delete items)
+// Role definition ID: 00000000-0000-0000-0000-000000000002
+
+// Reference the existing Cosmos DB account (provisioned by cosmos-db.bicep)
+resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-11-15' existing = if (!empty(cosmosAccountName)) {
+  name: cosmosAccountName
+}
+
+// User → Cosmos DB (local dev — read/write conversation state)
+resource userCosmosContributor 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-11-15' = if (!empty(userPrincipalId) && !empty(cosmosAccountName)) {
+  parent: cosmosAccount
+  name: guid(cosmosAccountId, userPrincipalId, '00000000-0000-0000-0000-000000000002')
+  properties: {
+    principalId: userPrincipalId
+    roleDefinitionId: '${cosmosAccountId}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002'
+    scope: cosmosAccountId
   }
 }
 

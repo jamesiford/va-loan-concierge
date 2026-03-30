@@ -124,10 +124,11 @@ This creates the following Azure resources:
 | AI Search | `srch-{env}` | Knowledge base index + Foundry IQ KB for Advisor Agent |
 | Function App | `func-{env}` | Custom MCP server — Flex Consumption (FC1) |
 | Storage Account | `st{env}` | KB document blobs + Function App runtime |
+| Cosmos DB | `cosmos-{env}` | Persistent conversation state (Serverless NoSQL) |
 | App Insights | `appi-{env}` | Monitoring + diagnostics |
 | Log Analytics | `log-{env}` | Required by App Insights |
 
-Plus 15 RBAC role assignments and 2 RemoteTool project connections — all automated.
+Plus RBAC role assignments (including Cosmos data-plane) and 2 RemoteTool project connections — all automated.
 
 After provisioning completes, `azd up` automatically:
 1. Uploads the 3 knowledge documents to blob storage
@@ -223,6 +224,17 @@ npm run dev
 
 Select a borrower profile (Marcus, Sarah, or James) and click a demo query button to see the full agent pipeline in action.
 
+### Troubleshooting: Cosmos DB Region Capacity
+
+If `azd up` fails with a Cosmos DB `ServiceUnavailable` error mentioning "high demand for zonal redundant accounts," the selected region has hit availability zone capacity limits. Deploy Cosmos DB to a different region while keeping everything else in your primary region:
+
+```bash
+azd env set COSMOS_LOCATION eastus2    # or any region with Cosmos capacity
+azd up
+```
+
+Cosmos DB is a globally distributed service — the region doesn't need to match the rest of the stack. When `COSMOS_LOCATION` is not set, Cosmos deploys to the same region as all other resources (the default and expected behavior).
+
 ### Tear Down
 
 ```bash
@@ -309,7 +321,7 @@ va-loan-concierge/
 ├── api/
 │   ├── server.py                # FastAPI — POST /api/chat SSE endpoint
 │   ├── telemetry.py             # OpenTelemetry — Azure Monitor exporter, per-agent spans
-│   └── conversation_state.py    # In-memory HIL conversation state (TTL-based)
+│   └── conversation_state.py    # Persistent HIL state (Cosmos DB or in-memory fallback)
 │
 ├── mcp-server/                  # Azure Function App — custom MCP server
 │   ├── function_app.py          # HTTP trigger — MCP JSON-RPC handler
@@ -384,7 +396,7 @@ An **Azure Function App** (`mcp-server/`) implements the MCP JSON-RPC protocol o
 
 ### Human-in-the-Loop — Multi-Turn Conversations
 
-The orchestrator supports **multi-turn conversations** where it pauses to collect user input before proceeding. State is tracked in-memory with a 10-minute TTL.
+The orchestrator supports **multi-turn conversations** where it pauses to collect user input before proceeding. Session state is persisted in **Cosmos DB** (production) or an in-memory fallback (local dev/tests), with a 10-minute TTL. State survives server restarts in production.
 
 **Calculator HIL — Loan Details Collection:**
 When no borrower profile is loaded and the calculator is needed, the orchestrator pauses with a 5-field prompt (balance, current rate, new rate, remaining term, fee exemption). If the calculator can't run with the provided details, it retries up to 3 times — or the user can say "skip" to move on.
@@ -397,6 +409,19 @@ After the Scheduler books an appointment, the orchestrator pauses for confirmati
 - **Unrecognized input** — moves on gracefully without creating a calendar event
 
 Both HIL patterns work in the Python orchestrator (React UI) and the Foundry Workflow Agent (Copilot Studio / Teams), using `GotoAction` loops and `ConditionGroup` branching in the declarative YAML. All HIL pause points include graceful fallbacks for unrecognized input.
+
+### Memory Architecture — Two Layers
+
+The system is designed around **two distinct memory layers** that serve different purposes:
+
+| Layer | Technology | Purpose | Scope |
+|---|---|---|---|
+| **Session State** | Cosmos DB (Phase 13) | Track orchestration flow within a conversation | Single session, 10-min TTL |
+| **Long-Term Memory** | Foundry Memory Stores (Phase 15 — planned) | Remember Veterans across conversations | Cross-session, persistent |
+
+**Session state** is structured and deterministic — routing flags, retry counts, pending actions, accumulated agent results. The Python orchestrator writes state at 11 mutation points; the Workflow Agent uses built-in workflow runtime variables. Both paths maintain behavioral parity.
+
+**Long-term memory** (planned) will use Foundry Memory Stores — a preview feature where the LLM automatically extracts and recalls semantic facts across conversations. Example: after Marcus refinances via IRRRL, the system remembers his rate, fee exemption status, and scheduling preferences. When he returns weeks later for a cash-out question, his context is already loaded — no re-collection needed. Memory Stores are per-agent and shared across both orchestration paths (React UI and Teams).
 
 ### Work IQ Calendar — M365 Integration (Calendar Agent)
 
@@ -454,12 +479,14 @@ Three selectable profiles inject personalized context into every agent query:
 | Real-time streaming | Every agent step streamed to the browser as SSE events |
 | Infrastructure-as-code | `azd up` provisions everything; `azd down` tears it all down |
 | Human-in-the-loop | Multi-turn conversations with calculator retry loops and appointment confirmation |
+| Persistent session state | Cosmos DB preserves HIL conversation state across server restarts (dual-backend with in-memory fallback) |
 | Profile-aware responses | Borrower context injected per-query; calculator uses real loan parameters |
 | Governed, citable AI | Every factual claim traces back to a specific knowledge document |
 | Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams — hardened with HIL parity, graceful fallbacks, and isolated agent contexts |
 | Guardrails & content safety | Four defense layers: per-agent Foundry guardrails (tool call + PII scanning), content filter IaC, agent instruction rules, MCP input validation |
 | Agent evaluations | OpenAI Evals API targeting registered agents server-side — task adherence, groundedness, coherence, relevance; results visible in Foundry portal (Build > Evaluations) |
 | Observability | Two-layer tracing: Foundry portal (LLM I/O, tool calls, tokens) + App Insights (HTTP requests, agent timing, routing decisions) via OpenTelemetry |
+| Agent Framework best practices | Orchestration uses `agent_reference` + Responses API — the canonical Microsoft Agent Framework pattern. ConnectedAgentTool (deprecated, classic API), A2APreviewTool (cross-system only), and Microsoft Agent Framework OSS (overkill for sequential pipeline) intentionally not used |
 
 ---
 
@@ -478,16 +505,22 @@ Three selectable profiles inject personalized context into every agent query:
 | 7 | Guardrails & Content Safety | Four defense layers: Foundry guardrails (per-agent, tool call scanning, PII), content filter IaC (Bicep raiPolicy), agent instruction safety rules, MCP input validation |
 | 8 | Agent Evaluations | OpenAI Evals API targeting registered agents server-side — task adherence, groundedness, coherence, relevance; results in Foundry portal (Build > Evaluations) |
 | 10 | Observability | Two-layer tracing: Foundry portal (automatic) + App Insights via OpenTelemetry (per-agent spans, routing timing, conversation audit), 90-day retention |
+| 13 | Persistent State (Cosmos DB) | HIL conversations survive server restarts — Cosmos DB NoSQL Serverless with dual-backend (in-memory fallback for tests), async SDK, TTL-based expiry, data-plane RBAC |
 
-### Planned
+### Up Next
 
 | Phase | Name | Goal | Key Changes |
 |---|---|---|---|
-| **9** | **Web App Deployment** | Deploy to Azure App Service (deferred — VM quota blocked) | `web-app.bicep` ready but not wired; demo runs locally for now |
-| **11** | **Authentication** | Entra ID Easy Auth — system knows who the user is | App registration via hook, `X-MS-CLIENT-PRINCIPAL` header extraction, Work IQ Calendar delegated auth |
-| **12** | **Network Isolation** | VNet + private endpoints for financial institution compliance | New `network.bicep` (VNet, 3 subnets, NSG, 3 PEs, 3 DNS zones), disable public access on all backend services, Function App moves to shared B1 plan, MI-based storage auth |
+| **14** | **Content Understanding** | Ingest VA rate changes and news into the knowledge base | GA Foundry Tool — custom analyzer + timer-triggered Azure Function → AI Search → Foundry IQ KB |
 
-Phase 9 (Web App) is deferred due to subscription VM quota limits. Phases 11-12 require Phase 9. The demo runs locally in the meantime.
+### Planned (blocked on Phase 9)
+
+| Phase | Name | Goal | Blocker |
+|---|---|---|---|
+| **9** | **Web App Deployment** | Deploy to Azure App Service | Subscription VM quota is 0 — demo runs locally |
+| **11** | **Authentication** | Entra ID Easy Auth | Requires Phase 9 (App Service) |
+| **12** | **Network Isolation** | VNet + private endpoints | Requires Phase 9 (VNet integration) |
+| **15** | **Foundry Memory Stores** | Cross-session Veteran memory — returning borrowers get personalized context | Requires Phase 11 (Auth) — needs authenticated user identity to associate memories |
 
 ---
 

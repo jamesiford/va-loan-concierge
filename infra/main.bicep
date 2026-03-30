@@ -60,6 +60,9 @@ param embeddingCapacity int = 30
 @allowed(['basic', 'standard', 'standard2'])
 param searchSku string = 'basic'
 
+@description('Region for Cosmos DB. Defaults to main location. Override with azd env set COSMOS_LOCATION if the primary region has capacity issues (e.g. AZ quota limits).')
+param cosmosLocation string = ''
+
 @description('Principal ID of the current user (for RBAC). Populated by azd.')
 param principalId string = ''
 
@@ -97,6 +100,15 @@ module storage 'modules/storage.bicep' = {
   params: {
     environmentName: environmentName
     location: location
+  }
+}
+
+module cosmosDb 'modules/cosmos-db.bicep' = {
+  name: 'cosmosDb'
+  scope: rg
+  params: {
+    environmentName: environmentName
+    location: empty(cosmosLocation) ? location : cosmosLocation
   }
 }
 
@@ -159,6 +171,8 @@ module rbac 'modules/rbac.bicep' = {
     projectId: aiProject.outputs.projectId
     userPrincipalId: principalId
     functionAppPrincipalId: functionApp.outputs.functionAppPrincipalId
+    cosmosAccountId: cosmosDb.outputs.cosmosAccountId
+    cosmosAccountName: cosmosDb.outputs.cosmosAccountName
   }
 }
 
@@ -192,3 +206,6 @@ output KNOWLEDGE_CONTAINER_NAME string = storage.outputs.knowledgeContainerName
 
 // Monitoring
 output APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.appInsightsConnectionString
+
+// Cosmos DB (conversation state)
+output COSMOS_ENDPOINT string = cosmosDb.outputs.cosmosEndpoint

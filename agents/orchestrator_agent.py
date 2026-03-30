@@ -24,7 +24,7 @@ Human-in-the-loop (HIL) flows:
   - Appointment: pauses for confirmation after booking — confirm (→ calendar),
     reschedule (→ re-run scheduler), or decline (→ skip calendar)
 
-State between turns is tracked in api/conversation_state.py (in-memory, 10-min TTL).
+State between turns is tracked in api/conversation_state.py (Cosmos DB or in-memory fallback, 10-min TTL).
 """
 
 import asyncio
@@ -46,6 +46,7 @@ from api.conversation_state import (
     ConversationState,
     create_conversation,
     get_conversation,
+    save_conversation,
 )
 from profiles import DEMO_PROFILES, _profile_context_block, _demo_context_block
 
@@ -413,7 +414,7 @@ class Orchestrator:
         # Check for an existing paused conversation to resume.
         state: ConversationState | None = None
         if conversation_id:
-            state = get_conversation(conversation_id)
+            state = await get_conversation(conversation_id)
 
         if state and state.pending_action:
             async for event in self._resume(state, query):
@@ -431,7 +432,7 @@ class Orchestrator:
     ) -> AsyncGenerator[dict, None]:
         """Run a fresh conversation, pausing for human input when needed."""
 
-        state = create_conversation(profile_id=profile_id, original_query=query)
+        state = await create_conversation(profile_id=profile_id, original_query=query)
 
         # Build the context-enriched query once — used by all agents.
         profile_ctx = _profile_context_block(profile_id)
@@ -453,6 +454,7 @@ class Orchestrator:
         state.needs_advisor = needs_advisor
         state.needs_calculator = needs_calculator
         state.needs_scheduler = needs_scheduler
+        await save_conversation(state)
         route_label = _route_label(needs_advisor, needs_calculator, needs_scheduler)
         yield {
             "type": "orchestrator_route",
@@ -506,6 +508,7 @@ class Orchestrator:
             if advisor_text:
                 has_response = True
                 state.advisor_text = advisor_text
+                await save_conversation(state)
                 yield {
                     "type": "partial_response",
                     "agent": "advisor",
@@ -519,6 +522,7 @@ class Orchestrator:
         # Scheduler does NOT need loan details — only day/time preference.
         if not profile_id and needs_calculator:
             state.pending_action = "awaiting_profile_info"
+            await save_conversation(state)
             yield {
                 "type": "await_input",
                 "message": (
@@ -573,6 +577,7 @@ class Orchestrator:
             )
             state.user_provided_details = True
             state.pending_action = None
+            await save_conversation(state)
 
             # Continue from calculator onwards.
             has_response = bool(state.advisor_text)
@@ -593,6 +598,7 @@ class Orchestrator:
                     "message": "⚠ Calculation skipped at borrower's request.",
                 }
                 state.pending_action = None
+                await save_conversation(state)
                 # Continue to scheduler if needed, otherwise complete.
                 if state.needs_scheduler and self._scheduler:
                     async for event in self._run_scheduler(state):
@@ -607,6 +613,7 @@ class Orchestrator:
                     if appointment_json and self._calendar:
                         state.appointment_json = appointment_json
                         state.pending_action = "awaiting_appointment_confirmation"
+                        await save_conversation(state)
                         yield {
                             "type": "await_input",
                             "message": (
@@ -637,6 +644,7 @@ class Orchestrator:
                     "refi_savings_calculator tool now.]"
                 )
                 state.pending_action = None
+                await save_conversation(state)
 
                 has_response = bool(state.advisor_text)
                 async for event in self._run_calculator_through_end(state, has_response):
@@ -678,6 +686,7 @@ class Orchestrator:
                 if appointment_json:
                     state.appointment_json = appointment_json
                     state.pending_action = "awaiting_appointment_confirmation"
+                    await save_conversation(state)
                     yield {
                         "type": "await_input",
                         "message": (
@@ -766,6 +775,7 @@ class Orchestrator:
             if calculator_text:
                 has_response = True
                 state.calculator_text = calculator_text
+                await save_conversation(state)
                 yield {
                     "type": "partial_response",
                     "agent": "calculator",
@@ -785,6 +795,7 @@ class Orchestrator:
                     }
                 else:
                     state.pending_action = "awaiting_calculator_retry"
+                    await save_conversation(state)
                     yield {
                         "type": "await_input",
                         "message": (
@@ -823,6 +834,7 @@ class Orchestrator:
             if appointment_json and self._calendar:
                 state.appointment_json = appointment_json
                 state.pending_action = "awaiting_appointment_confirmation"
+                await save_conversation(state)
                 yield {
                     "type": "await_input",
                     "message": (
@@ -900,6 +912,7 @@ class Orchestrator:
 
         if scheduler_text:
             state.scheduler_text = scheduler_text
+            await save_conversation(state)
             yield {
                 "type": "partial_response",
                 "agent": "scheduler",

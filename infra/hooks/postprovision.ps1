@@ -392,39 +392,81 @@ if ($FUNC_APP_NAME -and $AZURE_RESOURCE_GROUP) {
     Write-Host "  WARNING: FUNCTION_APP_NAME or AZURE_RESOURCE_GROUP not set, skipping MCP deploy"
 }
 
-# -- 11. Write .env from azd env values --
+# -- 11. Write .env from azd env values (preserve manual entries) --
+# Strategy: azd-managed keys are always written from azd outputs.
+# Any key already in .env that is NOT in the azd-managed set is preserved.
+# This protects manually-configured values (e.g. SCHEDULER_CALENDAR_*).
 
 Write-Host ""
-Write-Host "=== Writing .env from azd environment ==="
+Write-Host "=== Writing .env from azd environment (preserving manual entries) ==="
 
 $ENV_FILE = ".env"
 
-$envContent = @"
-FOUNDRY_PROJECT_ENDPOINT=$(azd env get-value FOUNDRY_PROJECT_ENDPOINT)
-FOUNDRY_MODEL_DEPLOYMENT=$(azd env get-value FOUNDRY_MODEL_DEPLOYMENT)
-AZURE_SUBSCRIPTION_ID=$(azd env get-value AZURE_SUBSCRIPTION_ID)
-FOUNDRY_PROJECT_RESOURCE_ID=$(azd env get-value FOUNDRY_PROJECT_RESOURCE_ID)
-ADVISOR_KNOWLEDGE_BASE_NAME=$KB_NAME
-ADVISOR_SEARCH_ENDPOINT=$SEARCH_ENDPOINT
-ADVISOR_MCP_CONNECTION=$ADVISOR_MCP_CONNECTION
-MCP_TOOLS_ENDPOINT=$MCP_TOOLS_ENDPOINT
-MCP_TOOLS_CONNECTION=$MCP_TOOLS_CONNECTION
-AI_SERVICES_NAME=$AI_SERVICES_NAME
-EMBEDDING_MODEL_DEPLOYMENT=$EMBEDDING_MODEL
-APPLICATIONINSIGHTS_CONNECTION_STRING=$(azd env get-value APPLICATIONINSIGHTS_CONNECTION_STRING)
-"@
-
-Set-Content -Path $ENV_FILE -Value $envContent -NoNewline
-
-$CALENDAR_ENDPOINT = (azd env get-value SCHEDULER_CALENDAR_ENDPOINT 2>$null)
-$CALENDAR_CONNECTION = (azd env get-value SCHEDULER_CALENDAR_CONNECTION 2>$null)
-
-if ($CALENDAR_ENDPOINT -and $CALENDAR_ENDPOINT -notmatch "^ERROR:") {
-    Add-Content -Path $ENV_FILE -Value "`nSCHEDULER_CALENDAR_ENDPOINT=$CALENDAR_ENDPOINT"
-    Add-Content -Path $ENV_FILE -Value "SCHEDULER_CALENDAR_CONNECTION=$CALENDAR_CONNECTION"
+# Keys that azd authoritatively owns — always written from azd outputs.
+$azdValues = [ordered]@{
+    "FOUNDRY_PROJECT_ENDPOINT"              = (azd env get-value FOUNDRY_PROJECT_ENDPOINT 2>$null)
+    "FOUNDRY_MODEL_DEPLOYMENT"              = (azd env get-value FOUNDRY_MODEL_DEPLOYMENT 2>$null)
+    "AZURE_SUBSCRIPTION_ID"                 = (azd env get-value AZURE_SUBSCRIPTION_ID 2>$null)
+    "FOUNDRY_PROJECT_RESOURCE_ID"           = (azd env get-value FOUNDRY_PROJECT_RESOURCE_ID 2>$null)
+    "ADVISOR_KNOWLEDGE_BASE_NAME"           = $KB_NAME
+    "ADVISOR_SEARCH_ENDPOINT"               = $SEARCH_ENDPOINT
+    "ADVISOR_MCP_CONNECTION"                = $ADVISOR_MCP_CONNECTION
+    "MCP_TOOLS_ENDPOINT"                    = $MCP_TOOLS_ENDPOINT
+    "MCP_TOOLS_CONNECTION"                  = $MCP_TOOLS_CONNECTION
+    "AI_SERVICES_NAME"                      = $AI_SERVICES_NAME
+    "EMBEDDING_MODEL_DEPLOYMENT"            = $EMBEDDING_MODEL
+    "APPLICATIONINSIGHTS_CONNECTION_STRING"  = (azd env get-value APPLICATIONINSIGHTS_CONNECTION_STRING 2>$null)
+    "COSMOS_ENDPOINT"                       = (azd env get-value COSMOS_ENDPOINT 2>$null)
 }
 
-Write-Host "  .env written"
+# Also write calendar values from azd env IF they exist there.
+$CALENDAR_ENDPOINT = (azd env get-value SCHEDULER_CALENDAR_ENDPOINT 2>$null)
+$CALENDAR_CONNECTION = (azd env get-value SCHEDULER_CALENDAR_CONNECTION 2>$null)
+if ($CALENDAR_ENDPOINT -and $CALENDAR_ENDPOINT -notmatch "^ERROR:") {
+    $azdValues["SCHEDULER_CALENDAR_ENDPOINT"]  = $CALENDAR_ENDPOINT
+    $azdValues["SCHEDULER_CALENDAR_CONNECTION"] = $CALENDAR_CONNECTION
+}
+
+# Read existing .env to preserve manually-set keys.
+$existingValues = [ordered]@{}
+if (Test-Path $ENV_FILE) {
+    foreach ($line in (Get-Content $ENV_FILE)) {
+        if ($line -match "^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$") {
+            $existingValues[$Matches[1]] = $Matches[2]
+        }
+    }
+}
+
+# Merge: azd values take precedence for azd-managed keys.
+# Existing values are preserved for all other keys.
+$merged = [ordered]@{}
+
+# Start with azd-managed values.
+foreach ($key in $azdValues.Keys) {
+    $merged[$key] = $azdValues[$key]
+}
+
+# Add any existing keys that azd doesn't manage (manual entries).
+$preservedCount = 0
+foreach ($key in $existingValues.Keys) {
+    if (-not $merged.Contains($key)) {
+        $merged[$key] = $existingValues[$key]
+        $preservedCount++
+    }
+}
+
+# Write the merged result.
+$lines = @()
+foreach ($key in $merged.Keys) {
+    $lines += "${key}=$($merged[$key])"
+}
+Set-Content -Path $ENV_FILE -Value ($lines -join "`n") -NoNewline
+
+if ($preservedCount -gt 0) {
+    Write-Host "  .env written ($preservedCount manual entries preserved)"
+} else {
+    Write-Host "  .env written"
+}
 
 # -- 12. Register Foundry agents --
 

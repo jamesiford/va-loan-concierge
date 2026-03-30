@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from agents.orchestrator_agent import Orchestrator
+from api.conversation_state import init_store, close_store
 from api.telemetry import setup_telemetry, get_tracer
 
 load_dotenv()
@@ -53,6 +54,30 @@ async def lifespan(app: FastAPI):
     """
     setup_telemetry(app)
 
+    # -- Cosmos DB state backend (or in-memory fallback) --
+    cosmos_endpoint = os.environ.get("COSMOS_ENDPOINT")
+    cosmos_container = None
+    cosmos_client = None
+
+    if cosmos_endpoint:
+        try:
+            from azure.cosmos.aio import CosmosClient
+            from azure.identity.aio import DefaultAzureCredential as AsyncCredential
+
+            cosmos_credential = AsyncCredential()
+            cosmos_client = CosmosClient(cosmos_endpoint, credential=cosmos_credential)
+            database = cosmos_client.get_database_client("va-loan-concierge")
+            cosmos_container = database.get_container_client("conversation-state")
+            logger.info("server: Cosmos DB client initialized → %s", cosmos_endpoint)
+        except Exception:
+            logger.warning(
+                "server: Cosmos DB init failed — falling back to in-memory state",
+                exc_info=True,
+            )
+            cosmos_container = None
+
+    await init_store(cosmos_container)
+
     logger.info("server: starting up — initializing orchestrator")
     orchestrator = Orchestrator()
 
@@ -72,6 +97,9 @@ async def lifespan(app: FastAPI):
     logger.info("server: shutting down")
     if app.state.orchestrator is not None:
         await app.state.orchestrator.close()
+    await close_store()
+    if cosmos_client is not None:
+        await cosmos_client.close()
 
 
 # ---------------------------------------------------------------------------

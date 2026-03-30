@@ -571,7 +571,7 @@ class TestHumanInTheLoop:
         conv_id = await_evt["conversation_id"]
 
         # Verify the state was saved
-        state = get_conversation(conv_id)
+        state = await get_conversation(conv_id)
         assert state is not None
         assert state.pending_action == "awaiting_profile_info"
 
@@ -584,7 +584,7 @@ class TestHumanInTheLoop:
         # Calculator should have run this time
         assert "calculator_start" in types2
         # Verify state flag was set
-        state2 = get_conversation(conv_id)
+        state2 = await get_conversation(conv_id)
         if state2:
             assert state2.user_provided_details is True
 

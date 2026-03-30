@@ -174,6 +174,59 @@ emits an `await_input` SSE event with `conversation_id` for resumption.
   loan details (prevents profile-based context from overriding user input)
 - `calculator_retry_count`: `int` — max 3 attempts before forcing skip
 
+#### Memory Architecture — Session State vs. Long-Term Memory
+
+The system uses **two distinct memory layers** that serve fundamentally different purposes:
+
+| | Session State (Phase 13) | Long-Term Memory (Phase 15 — planned) |
+|---|---|---|
+| **What it is** | Cosmos DB conversation state | Foundry Memory Stores (preview) |
+| **Purpose** | Track orchestration flow within a single conversation | Remember facts about the borrower across conversations |
+| **What it stores** | Routing flags, retry counts, pending actions, agent results | Semantic facts the LLM extracts ("Marcus prefers Thursday appointments") |
+| **Scope** | Single conversation, 10-minute TTL | Cross-conversation, long-lived (weeks/months) |
+| **Who reads/writes** | Python orchestrator code (explicit `save_conversation()`) | The LLM automatically (retrieves relevant memories at inference time) |
+| **Backend** | `azure.cosmos.aio` — direct point reads/writes | `client.beta.memory_stores` — Foundry-managed |
+| **Visible in portal** | No (custom Cosmos container) | Yes (Memory section on agent definition page) |
+
+**Why two layers:** Session state is structured and deterministic — the orchestrator needs
+to know exactly which agents have run, what the retry count is, and what pending action to
+resume. This cannot be left to LLM recall. Long-term memory is semantic and probabilistic —
+it enriches future conversations with relevant context the LLM retrieves automatically.
+
+**Expanded use case — Returning Veteran:**
+Marcus calls for the first time and refinances via IRRRL. Session state manages the
+multi-turn HIL flow (loan details → calculator → appointment → confirmation). Long-term
+memory captures: "Marcus completed IRRRL refi at 6.1%, is funding-fee-exempt (10%
+disability), prefers Thursday afternoon appointments, loan officer was Sarah Chen."
+
+Three weeks later, Marcus calls back about a home equity question. Long-term memory
+surfaces his prior context — the system greets him with relevant history, skips
+re-collecting known details, and routes to the Advisor with enriched context. Meanwhile,
+session state independently tracks the new conversation's HIL flow from scratch.
+
+#### Orchestration Path Parity — Python vs. Workflow
+
+The two orchestration paths (Python backend, Foundry Workflow Agent) handle state
+differently by design:
+
+| | Python Orchestrator (React UI) | Workflow Agent (Teams / Copilot Studio) |
+|---|---|---|
+| **Session state** | Cosmos DB (Phase 13) | Foundry workflow runtime (built-in) |
+| **HIL mechanism** | `await_input` SSE + `conversation_id` resume | `Question` nodes + `GotoAction` loops |
+| **State variables** | `ConversationState` dataclass (14 fields) | `Local.*` workflow variables |
+| **Persistence** | Explicit `save_conversation()` at 11 points | Automatic (workflow runtime manages scope) |
+| **Long-term memory** | Phase 15 planned (Foundry Memory Stores) | Same — Memory Stores are per-agent, shared across paths |
+
+Parity is maintained at the **behavioral level** — same routing logic, same HIL flows,
+same keywords, same agent capabilities. The state mechanism is intentionally different
+because the two paths run in different execution environments. Adding Cosmos DB to the
+workflow path would be redundant since the Foundry workflow runtime already persists
+variable state across turns automatically.
+
+Long-term memory (Phase 15) will be shared across both paths because Foundry Memory
+Stores are attached to the agent definition, not the calling surface. A memory created
+during a React UI session will be available when the same Veteran uses Teams, and vice versa.
+
 ---
 
 ## Frontend UI (`ui/`)
@@ -692,9 +745,15 @@ Workflow Agent. The workflow YAML has been hardened (simplified from 740 to ~289
 Power Fx fixes, conversationId isolation, graceful HIL fallbacks) and validated in the
 Foundry playground.
 
-**Completed:** Phases 1–8 + 10 (foundation, agents, MCP, Foundry IQ, workflow agent, IaC,
-guardrails, evaluations, observability) + HIL orchestration + workflow hardening.
-**Next:** Phase 9 (web app, deferred — VM quota) → 11 (auth) → 12 (network isolation).
+**Completed:** Phases 1–8 + 10 + 13 (foundation, agents, MCP, Foundry IQ, workflow agent, IaC,
+guardrails, evaluations, observability, Cosmos DB state) + HIL orchestration + workflow hardening.
+**Next (independent, can start now):** Phase 14 (Content Understanding).
+**Blocked on Phase 9 (VM quota):** Phase 11 (auth) → 12 (network isolation).
+**Blocked on Phase 11 (auth):** Phase 15 (Foundry Memory Stores — cross-session Veteran memory).
+**Validated (not a phase):** Orchestration patterns confirmed as Microsoft Agent Framework
+best practices — `agent_reference` + Responses API is the canonical pattern. ConnectedAgentTool
+(deprecated), A2APreviewTool (cross-system only), and Microsoft Agent Framework (overkill)
+are intentionally not used. See Phase 5 rationale.
 Teams publishing investigated 2026-03-26 — blocked by cross-tenant limitations.
 
 ---
@@ -899,11 +958,15 @@ hosted agents. Private networking is also supported (hosted agents do not suppor
 preview).
 
 **Why not ConnectedAgentTool / A2APreviewTool:**
-- `ConnectedAgentTool` — available in `azure.ai.agents.models` 2.x SDK, but user prefers
-  declarative workflow for Foundry-native orchestration
-- `A2APreviewTool` — requires each sub-agent to be separately deployed as an A2A-protocol
-  HTTP server. Foundry agents are A2A *clients*, not servers. Adds infrastructure with no
-  benefit.
+- `ConnectedAgentTool` — **deprecated**. Part of the classic Foundry Agent Service API
+  (Threads/Runs model). Removed from the new Foundry portal. Does not exist in
+  `azure-ai-projects` 2.0.1 SDK. Classic agents retire March 31, 2027. The Python
+  orchestrator + `agent_reference` + Responses API pattern is the canonical replacement
+  (confirmed by Microsoft docs, Azure Architecture Center, and community implementations)
+- `A2APreviewTool` — designed for **cross-system** agent-to-agent communication (Google's
+  A2A protocol). Not appropriate for co-located agents in the same Foundry project. Preview
+  status, adds HTTP round-trip overhead for each agent call. Each sub-agent would need to be
+  deployed as a separate A2A HTTP server — significant infrastructure overhead with no benefit
 
 **Phase 0 — Foundation** ✅ COMPLETE
 - [x] Refactor: `Orchestrator` class → `agents/orchestrator_agent.py`; profiles/context
@@ -1304,9 +1367,300 @@ Items:
 
 ---
 
+### Phase 13. Persistent Conversation State — Cosmos DB — ✅ COMPLETE
+
+**Goal:** Replace the ephemeral in-memory conversation state (`api/conversation_state.py`)
+with Azure Cosmos DB for NoSQL, so HIL conversations survive server restarts and support
+multi-instance scaling.
+
+**Why Cosmos DB NoSQL Serverless:**
+- Foundry's own BYO Thread Storage uses Cosmos DB internally — aligns with ecosystem
+- Serverless: pay-per-RU (~$0/month for demo workload), no capacity planning needed
+- Seamless migration path to Provisioned Throughput later if needed
+- `disableLocalAuth: true` (RBAC-only) matches project's existing security pattern
+- Native TTL support eliminates manual `_cleanup_expired()` logic
+
+**Why not Foundry built-in state:**
+- Foundry BYO Thread Storage (`enterprise_memory`) is for the Assistants/Threads API —
+  this project uses the Responses API with Python-level orchestration
+- Foundry Memory Stores (preview, `client.beta.memory_stores`) are for semantic long-term
+  memory ("remember what the user said"), not structured orchestration state (routing flags,
+  retry counts, pending actions)
+- Custom Cosmos DB gives full control over schema, TTL, and query patterns
+
+**Container design:**
+- Account: Serverless NoSQL (`capabilities: [EnableServerless]`)
+- Database: `va-loan-concierge`
+- Container: `conversation-state`
+- Partition key: `/conversation_id` (point reads = 1 RU, writes ~6 RU for 2 KB docs)
+- TTL: `defaultTtl: 600` (10 min — resets on each upsert via Cosmos `_ts` field)
+- Indexing: minimal — only `/conversation_id/?` and `/pending_action/?`, everything else
+  excluded to save RU on writes
+
+**RBAC (critical — Cosmos DB uses data-plane roles, NOT Azure control-plane):**
+- Resource type: `Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments`
+  (NOT `Microsoft.Authorization/roleAssignments` like the rest of the project)
+- Role: `Cosmos DB Built-in Data Contributor` (ID `00000000-0000-0000-0000-000000000002`)
+- Principals: current user (local dev) + future Web App MI (Phase 9)
+
+**Python SDK pattern (async):**
+- Package: `azure-cosmos>=4.9.0` (async via `azure.cosmos.aio`)
+- Single `CosmosClient` instance for application lifetime (created in server lifespan)
+- `read_item()` for point reads (1 RU) — not `query_items()` (3+ RU)
+- `upsert_item()` for create-or-update (resets `_ts`, extending TTL)
+- `ConversationState` dataclass shape is unchanged — only the persistence layer changes
+
+**New Bicep module: `infra/modules/cosmos-db.bicep`**
+- Serverless NoSQL account: `cosmos${cleanName}`
+- Database + container with TTL and minimal indexing policy
+- `disableLocalAuth: true`, `consistencyPolicy: Session`
+
+**Modify: `infra/main.bicep`**
+- Add `module cosmosDb 'modules/cosmos-db.bicep'` at Level 0 (independent)
+- Output: `COSMOS_ENDPOINT`
+
+**Modify: `infra/modules/rbac.bicep`**
+- Add Cosmos data-plane role assignments (new `sqlRoleAssignments` resource type)
+
+**Modify: `infra/hooks/postprovision.ps1`**
+- Write `COSMOS_ENDPOINT` to `.env`
+
+**Code changes:**
+- `requirements.txt` — add `azure-cosmos>=4.9.0`
+- `api/conversation_state.py` — rewrite: async Cosmos client replaces in-memory dict.
+  New async functions: `init_cosmos()`, `create_conversation()`, `get_conversation()`,
+  `save_conversation()`, `delete_conversation()`. Remove `_store`, `_cleanup_expired`,
+  `is_expired`
+- `api/server.py` — init Cosmos client in lifespan startup, close on shutdown
+- `agents/orchestrator_agent.py` — make state calls `await`, add
+  `await save_conversation(state)` after each mutation (~15 points throughout the file)
+- `tests/test_orchestrator.py` — mock Cosmos operations or provide in-memory fallback
+
+Items:
+- [x] Create `infra/modules/cosmos-db.bicep` (Serverless account + database + container)
+- [x] Modify `infra/main.bicep` — wire Cosmos module + outputs
+- [x] Modify `infra/modules/rbac.bicep` — add Cosmos data-plane role assignments
+- [x] Modify `infra/hooks/postprovision.ps1` — write COSMOS_ENDPOINT to .env
+- [x] Add `azure-cosmos>=4.9.0` to `requirements.txt`
+- [x] Rewrite `api/conversation_state.py` — dual-backend (Cosmos + in-memory fallback)
+- [x] Update `api/server.py` — Cosmos client lifecycle in lifespan
+- [x] Update `agents/orchestrator_agent.py` — async state calls + save after mutations
+- [x] Update `.env.example` — add `COSMOS_ENDPOINT`
+- [x] Update tests — `init_store()` fixture + async `get_conversation` calls
+- [x] All 111 tests passing
+- [x] Test: `azd up` provisions Cosmos account + database + container (confirmed 2026-03-29; East US AZ capacity workaround via `COSMOS_LOCATION` override)
+- [x] Test: restart server, resume HIL conversation — state persists (confirmed 2026-03-29 via UI; requires `pip install azure-cosmos` — missing package causes silent in-memory fallback)
+- [ ] Test: wait 10+ min — expired state auto-deleted by Cosmos TTL
+
+---
+
+### Phase 14. Content Understanding — VA Rate & News Intelligence Pipeline — PLANNED
+
+**Goal:** Add a Content Understanding ingestion pipeline that processes external content
+(VA rate changes, policy updates, mortgage industry news) into structured data, pushes it
+to Azure AI Search, and makes it queryable by the existing Advisor Agent via Foundry IQ.
+
+**What is Content Understanding:**
+Azure Content Understanding is a **GA Foundry Tool** (API `2025-11-01`, Python SDK
+`azure-ai-contentunderstanding>=1.0.1`) that uses generative AI to process unstructured
+content (documents, HTML, images, audio, video) into **user-defined structured output**.
+It runs on the same `Microsoft.CognitiveServices/accounts` (kind: `AIServices`) resource
+the project already uses.
+
+Core concept: **Analyzers** — configurable processing units that define a field schema
+with three extraction methods per field:
+- `extract` — literal values from content (titles, dates, names)
+- `generate` — AI-generated values (summaries, relevance assessments)
+- `classify` — categorize against an enum (source type, rate direction)
+
+**Why Content Understanding (not just more markdown files):**
+- Processes real HTML/web content into consistent structured output with confidence scores
+- Custom analyzers enforce schema consistency across diverse sources
+- Supports GA Python SDK with async client
+- Runs on the existing AI Services resource (no new infrastructure)
+- Content Understanding MCP server for direct agent access is "coming soon" (not yet available)
+
+**Architecture:**
+```
+RSS/Web Feeds → Timer-Triggered Azure Function → Content Understanding (Custom Analyzer)
+    → Structured JSON → Azure AI Search Index → Foundry IQ KB → Advisor Agent (existing)
+```
+
+**Custom analyzer field schema (VA Mortgage News):**
+- `Title` (extract), `PublishDate` (extract)
+- `SourceType` (classify: rate_change | policy_update | industry_news | va_circular |
+  lender_bulletin)
+- `Summary` (generate: 2-3 sentences for veterans/lenders)
+- `RateInfo` (generate: object — current_rate, previous_rate, effective_date, direction)
+- `PolicyUpdate` (generate: object — affected_area, change_description, effective_date)
+- `RelevanceToVeterans` (generate: one sentence)
+
+**Model deployments:**
+Content Understanding requires completion + embedding models. Options:
+- Add `gpt-4.1-mini` deployment (CU default for field extraction — cheaper than gpt-4.1)
+- Configure CU defaults to use existing `gpt-4.1` and `text-embedding-3-small` deployments
+  (avoids new deployments but uses more expensive model for extraction)
+
+**New files:**
+- `tools/content_ingestion.py` — Content Understanding client wrapper: create/manage
+  analyzer, analyze content, push structured output to search index
+- `tools/feed_sources.json` — RSS feed URLs and web source configuration
+- `mcp-server/ingest_trigger.py` — Timer-triggered Azure Function (every 4 hours):
+  fetch RSS feeds → download articles → CU analyze → push to search index
+
+**Files to modify:**
+- `infra/modules/ai-services.bicep` — (optional) add `gpt-4.1-mini` model deployment
+- `infra/hooks/postprovision.ps1` — create news search index + configure CU analyzer defaults
+- `agents/advisor_agent.py` — update `ADVISOR_INSTRUCTIONS` to reference news/rate sources,
+  include publish dates in citations for timely content
+- `requirements.txt` — add `azure-ai-contentunderstanding>=1.0.1`, `feedparser>=6.0.0`
+- `mcp-server/requirements.txt` — add same dependencies for Function App
+- `.env.example` — add `CU_ANALYZER_NAME=`, `NEWS_INDEX_NAME=`
+
+**What NOT to do:**
+- Do NOT use CU as a real-time agent tool — it is async batch processing (seconds to minutes
+  latency), not suitable for synchronous agent calls
+- Do NOT bypass Foundry IQ — CU produces data, Foundry IQ provides agentic retrieval with
+  citations and permissions. CU is the producer; Foundry IQ is the consumer
+- Do NOT use the preview-only Pro mode (`2025-05-01-preview`) — multi-file analysis and
+  external KB features are not in the GA API
+
+Items:
+- [ ] Create custom CU analyzer via Python SDK or REST API
+- [ ] Create `tools/content_ingestion.py` — CU client wrapper + search push
+- [ ] Create `tools/feed_sources.json` — RSS/web source configuration
+- [ ] Create `mcp-server/ingest_trigger.py` — timer-triggered ingestion function
+- [ ] Create news search index in `postprovision.ps1`
+- [ ] (Optional) Add `gpt-4.1-mini` model deployment to `ai-services.bicep`
+- [ ] Update `agents/advisor_agent.py` instructions for news/rate sources
+- [ ] Add dependencies to `requirements.txt` and `mcp-server/requirements.txt`
+- [ ] Test: manually ingest sample VA news article → verify structured output
+- [ ] Test: ask Advisor "What are current VA loan rates?" → verify news source cited
+- [ ] Test: timer trigger fires on schedule and ingests new content
+
+---
+
+### Phase 15. Foundry Memory Stores — Semantic Long-Term Memory — PLANNED
+
+**Goal:** Add cross-conversation memory so the system remembers Veterans across sessions —
+prior interactions, preferences, loan history, and communication patterns. This complements
+Phase 13's session state (which tracks a single conversation's HIL flow) with a persistent
+semantic layer that enriches future conversations automatically.
+
+**What are Foundry Memory Stores:**
+Foundry Memory Stores (`client.beta.memory_stores`) are a **preview** feature that gives
+agents automatic long-term memory. The LLM extracts salient facts from conversations and
+stores them as semantic memories. On future interactions, relevant memories are retrieved
+automatically and injected into the agent's context — no explicit code needed for retrieval.
+
+Memory Stores are attached to agent definitions in the Foundry portal (the "Memory" section
+visible on each agent's configuration page). They are per-agent but shared across all
+calling surfaces — a memory created during a React UI session is available when the same
+Veteran uses Teams via the Workflow Agent, and vice versa.
+
+**Expanded use case — Returning Veteran Recognition:**
+
+*First visit (all managed by Phase 13 session state):*
+Marcus asks about refinancing. The orchestrator's session state manages the multi-turn HIL
+flow: pause for loan details → calculator runs → appointment booked for Thursday → user
+confirms → calendar event created. Session state expires after 10 minutes of inactivity.
+
+*Long-term memory captures (Phase 15 — automatic):*
+- "Marcus completed IRRRL refinance from 6.8% to 6.1% on existing VA loan"
+- "Marcus is funding-fee-exempt (10% disability rating)"
+- "Marcus prefers Thursday afternoon appointments"
+- "Marcus's loan officer was Sarah Chen (confirmation #LOAN-84921)"
+- "Marcus's loan balance was approximately $320,000"
+
+*Three weeks later — Marcus returns:*
+Marcus asks: "I'm thinking about a cash-out refi to fund some home improvements."
+Long-term memory automatically surfaces his prior context. The Advisor Agent knows he has
+an existing VA loan (recently refinanced to 6.1%), is fee-exempt, and was working with
+Sarah Chen. The system:
+1. Skips basic eligibility questions (already established he has a VA loan)
+2. Provides cash-out refi advice contextualized to his 6.1% rate and ~$320K balance
+3. Pre-fills calculator with known loan parameters (session state collects only the new
+   details — desired cash-out amount, estimated home value)
+4. Offers to book with Sarah Chen again on a Thursday afternoon
+
+This demonstrates both memory layers working together:
+- **Session state** (Cosmos DB) manages the current conversation's HIL flow from scratch
+- **Long-term memory** (Foundry Memory Stores) enriches the conversation with context from
+  weeks ago, creating a personalized experience without re-collecting known information
+
+**Architecture:**
+```
+                        ┌──────────────────────────┐
+                        │   Foundry Memory Store    │
+                        │  (semantic, cross-session) │
+                        │  "Marcus prefers Thurs"   │
+                        │  "IRRRL at 6.1%, exempt"  │
+                        └─────────┬────────────────┘
+                                  │ auto-retrieved at inference
+                                  ▼
+User ──→ Orchestrator ──→ [Agent + Memory Context] ──→ Response
+              │
+              ▼
+     ┌─────────────────┐
+     │  Cosmos DB State  │
+     │  (structured,     │
+     │   single-session) │
+     │  pending_action,  │
+     │  retry_count...   │
+     └─────────────────┘
+```
+
+**Why Foundry Memory Stores (not custom Cosmos collections):**
+- Automatic extraction — the LLM decides what is worth remembering, no manual code
+- Automatic retrieval — relevant memories are injected at inference time, no query logic
+- Portal-native — visible and manageable in the Foundry portal Memory section
+- Shared across orchestration paths — React UI and Teams/Workflow Agent use the same store
+- Preview feature aligns with Foundry roadmap (expected to GA alongside Responses API maturity)
+
+**Implementation approach:**
+- Enable Memory Stores on the Orchestrator agent (primary — sees all conversations)
+- Optionally enable on Advisor agent (KB-enriched memories for loan-specific facts)
+- Configure memory instructions to focus on: loan details, preferences, prior outcomes,
+  communication patterns (NOT PII like SSN, account numbers, or full addresses)
+- Update agent instructions to reference and leverage recalled memories
+- Add memory-aware greeting logic: if memories exist for the user, acknowledge prior context
+- Test: first conversation → verify memories created in portal; second conversation →
+  verify relevant memories recalled and used
+
+**Privacy and compliance considerations:**
+- Memory Stores inherit the agent's content safety policies (Phase 7 guardrails)
+- Must exclude PII from memory extraction (configure via memory instructions)
+- Retention policy TBD — may need periodic memory pruning for compliance
+- Veteran consent UX: inform user that the system remembers prior interactions
+- Memory deletion API needed for "right to be forgotten" requests
+
+**Prerequisite:** Phase 11 (Authentication) — long-term memory is only meaningful when
+users are authenticated. Without auth, there's no way to associate memories with a
+specific Veteran across sessions.
+
+**Files to modify:**
+| File | Change |
+|------|--------|
+| `agents/orchestrator_agent.py` | Enable Memory Store on agent registration; add memory-aware greeting logic |
+| `agents/advisor_agent.py` | (Optional) Enable Memory Store for loan-specific recall |
+| `profiles.py` | Update `_profile_context_block` to merge recalled memories with profile data |
+| `api/server.py` | Pass authenticated user ID to orchestrator (requires Phase 11) |
+| `CLAUDE.md` | Document Phase 15 |
+
+Items:
+- [ ] Enable Memory Stores on Orchestrator agent in Foundry portal
+- [ ] Configure memory instructions (what to remember, what to exclude)
+- [ ] Update agent instructions to reference recalled memories
+- [ ] Add memory-aware greeting logic to orchestrator
+- [ ] Test: first visit creates memories → second visit recalls them
+- [ ] Add privacy controls (PII exclusion, consent UX, deletion API)
+- [ ] Verify memories shared across React UI and Workflow Agent paths
+
+---
+
 ### Phase Sequencing
 
-Phases 1–8 are complete. Phases 9–12 bring production readiness.
+Phases 1–8 + 10 + 13 are complete. Phases 9–16 bring production readiness and new capabilities.
 Each `azd up` leaves the system fully working.
 
 ```
@@ -1314,9 +1668,27 @@ Completed:
   Phase 1 (Foundation) → Phase 2 (Agents + HIL) → Phase 3 (Foundry IQ KB)
   → Phase 4 (MCP Server) → Phase 5 (Workflow Agent) → Phase 6 (IaC)
   → Phase 7 (Guardrails) → Phase 8 (Evaluations) → Phase 10 (Observability)
+  → Phase 13 (Cosmos DB State)
 
-Planned:
+Planned (existing, blocked on Phase 9):
   Phase 9 (Web App)       ← DEFERRED (VM quota); demo runs locally
       ├── Phase 11 (Auth)          — requires Phase 9 (App Service for Easy Auth)
       └── Phase 12 (Network)       — requires Phase 9 (VNet integration needs App Service)
+
+Planned (independent — can start immediately):
+  Phase 14 (Content Understanding) ← new capability, enriches demo
+
+Planned (requires Phase 11):
+  Phase 15 (Foundry Memory Stores) ← cross-session Veteran memory (requires auth)
+
+Validated (not a numbered phase):
+  Orchestration patterns confirmed as MAF best practices (2026-03-29).
+  See Phase 5 "Why not ConnectedAgentTool / A2APreviewTool" for rationale.
+
+Dependency graph:
+  Phase 14 is independent of Phases 9–12.
+  Phase 13 complements Phase 9 (Web App MI gets Cosmos RBAC when unblocked).
+  Phase 14 extends Phase 3 (Foundry IQ KB gets new content source).
+  Phase 15 requires Phase 11 (Auth) — long-term memory needs authenticated user identity.
+  Phase 15 complements Phase 13 — session state (structured) + long-term memory (semantic).
 ```

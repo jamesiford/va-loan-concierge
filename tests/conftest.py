@@ -9,6 +9,20 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from azure.core.exceptions import ResourceNotFoundError
 
+from api.conversation_state import init_store, close_store
+
+
+# ---------------------------------------------------------------------------
+# Initialize in-memory conversation state backend for all tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+async def _init_conversation_state():
+    """Ensure the in-memory state backend is initialized before every test."""
+    await init_store()  # no args → in-memory backend
+    yield
+    await close_store()
+
 # Ensure required env vars exist before any module-level imports trigger them.
 os.environ.setdefault("FOUNDRY_PROJECT_ENDPOINT", "https://test.foundry.azure.com")
 os.environ.setdefault("FOUNDRY_MODEL_DEPLOYMENT", "gpt-4o-test")
