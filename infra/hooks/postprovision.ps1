@@ -419,13 +419,9 @@ $azdValues = [ordered]@{
     "COSMOS_ENDPOINT"                       = (azd env get-value COSMOS_ENDPOINT 2>$null)
 }
 
-# Also write calendar values from azd env IF they exist there.
-$CALENDAR_ENDPOINT = (azd env get-value SCHEDULER_CALENDAR_ENDPOINT 2>$null)
-$CALENDAR_CONNECTION = (azd env get-value SCHEDULER_CALENDAR_CONNECTION 2>$null)
-if ($CALENDAR_ENDPOINT -and $CALENDAR_ENDPOINT -notmatch "^ERROR:") {
-    $azdValues["SCHEDULER_CALENDAR_ENDPOINT"]  = $CALENDAR_ENDPOINT
-    $azdValues["SCHEDULER_CALENDAR_CONNECTION"] = $CALENDAR_CONNECTION
-}
+# SCHEDULER_CALENDAR_ENDPOINT and SCHEDULER_CALENDAR_CONNECTION are manual-only
+# (configured in the Foundry portal). They are never resolved from azd env.
+# The merge logic below preserves them from the existing .env if present.
 
 # Read existing .env to preserve manually-set keys.
 $existingValues = [ordered]@{}
