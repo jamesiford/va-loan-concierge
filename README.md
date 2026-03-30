@@ -142,33 +142,40 @@ After provisioning completes, `azd up` automatically:
 
 ### Manual Step 1: Create Foundry IQ Knowledge Base
 
-The Advisor Agent requires a Foundry IQ Knowledge Base that wraps the AI Search index created by `azd up`. This must be created manually in the Foundry portal because the SDK for programmatic KB creation is in preview and unreliable.
+The Advisor Agent requires a Foundry IQ Knowledge Base backed by the blob storage container that `azd up` populates. This must be created manually in the Foundry portal because the SDK for programmatic KB creation is in preview and unreliable.
 
 1. Open the [Azure AI Foundry portal](https://ai.azure.com) → your project (`proj-{env}`)
 2. Go to **Knowledge** (left sidebar) → **+ New knowledge base**
-3. Fill in the following:
+3. Fill in the knowledge base details:
 
 | Field | Value |
 |---|---|
 | **Name** | `kb-va-loan-guidelines` |
 | **Description** | `VA Loan Concierge knowledge base for the Advisor Agent. Answers Veteran questions about VA loan eligibility, IRRRL qualification, funding fees, entitlement calculations, lender products, and the homebuying process with cited, grounded responses.` |
 
-4. Under **Knowledge sources**, click **+ Add source** → **Azure AI Search index**:
-   - Select the search service (`srch-{env}`) and index (`kb-va-loan-guidelines`)
-   - Source description:
-     > VA loan knowledge base containing eligibility guidelines, lender product details (IRRRL, Cash-Out Refi, VA Jumbo, VA Renovation), and borrower FAQ covering process steps, myths, and edge cases. Sources: VA guidelines, Valor Home Lending products, loan process FAQ.
+4. Under **Knowledge sources**, click **+ Add source** → **Azure Blob Storage**:
+
+| Field | Value |
+|---|---|
+| **Storage account** | `st{env}` |
+| **Container** | `knowledge-base` |
+| **Source description** | `VA loan knowledge base containing eligibility guidelines, lender product details (IRRRL, Cash-Out Refi, VA Jumbo, VA Renovation), and borrower FAQ covering process steps, myths, and edge cases. Sources: VA guidelines, Valor Home Lending products, loan process FAQ.` |
 
 5. Under **Retrieval settings**:
-   - **Output mode**: `Extractive data`
-   - **Reasoning effort**: `Low`
-   - **Retrieval instructions**:
-     > You are answering questions from Veterans about VA home loans. Always search all knowledge sources to find relevant information. Prioritize VA guidelines for eligibility and regulatory questions. Use lender products for rate, pricing, and product-specific questions. Use the FAQ for process steps, common misconceptions, and edge cases. If multiple sources are relevant, synthesize them into a cohesive answer. Always cite which source supports each claim.
-   - **Answer instructions**:
-     > Provide clear, accurate answers grounded in the knowledge sources. Use a professional but approachable tone appropriate for Veterans. Structure longer answers with bullet points or numbered lists. When citing sources, reference the document name (e.g., va_guidelines.md). If information is not found in the knowledge base, say so clearly — do not speculate or invent facts. For calculations or scheduling requests, note that those are handled by separate specialist agents.
+
+| Field | Value |
+|---|---|
+| **Output mode** | `Extractive data` |
+| **Reasoning effort** | `Low` |
+| **Retrieval instructions** | `You are answering questions from Veterans about VA home loans. Always search all knowledge sources to find relevant information. Prioritize VA guidelines for eligibility and regulatory questions. Use lender products for rate, pricing, and product-specific questions. Use the FAQ for process steps, common misconceptions, and edge cases. If multiple sources are relevant, synthesize them into a cohesive answer. Always cite which source supports each claim.` |
+| **Answer instructions** | `Provide clear, accurate answers grounded in the knowledge sources. Use a professional but approachable tone appropriate for Veterans. Structure longer answers with bullet points or numbered lists. When citing sources, reference the document name (e.g., va_guidelines.md). If information is not found in the knowledge base, say so clearly — do not speculate or invent facts. For calculations or scheduling requests, note that those are handled by separate specialist agents.` |
 
 6. Under **Model configuration**:
-   - Select the embedding model deployment (`text-embedding-3-small`)
-   - Select the chat model deployment (e.g. `gpt-4.1`)
+
+| Field | Value |
+|---|---|
+| **Embedding model** | `text-embedding-3-small` |
+| **Chat model** | `gpt-4.1` |
 
 7. Click **Create**
 
