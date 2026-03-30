@@ -1458,8 +1458,9 @@ Items:
 ### Phase 14. Content Understanding — VA Rate & News Intelligence Pipeline — ✅ COMPLETE
 
 **Goal:** Add a Content Understanding ingestion pipeline that processes external content
-(VA rate changes, policy updates, mortgage industry news) into structured data, pushes it
-to Azure AI Search, and makes it queryable by the existing Advisor Agent via Foundry IQ.
+(VA rate changes, policy updates, mortgage industry news) into structured markdown files,
+stores them in blob storage, and makes them queryable by the existing Advisor Agent via
+Foundry IQ (which auto-vectorizes blobs added as a knowledge source).
 
 **What is Content Understanding:**
 Azure Content Understanding is a **GA Foundry Tool** (Python SDK `azure-ai-contentunderstanding>=1.0.1`)
@@ -1481,7 +1482,7 @@ with exact model-name keys) followed by analyzer creation with `models={"complet
 Requires three deployed models: `gpt-4.1` (existing), `gpt-4.1-mini` (new), `text-embedding-3-large` (new).
 Both new models added to `ai-services.bicep` and deployed separately for the demo.
 
-**Architecture:**
+**Architecture (blob storage output — Foundry IQ auto-vectorizes):**
 ```
 RSS Feeds (VA.gov, CFPB, Freddie Mac, MBA)
     │  every 4 hours
@@ -1489,20 +1490,27 @@ RSS Feeds (VA.gov, CFPB, Freddie Mac, MBA)
 mcp-server/ingest_trigger.py  (timer + HTTP Azure Functions)
     ├── feedparser: fetch + normalize articles
     └── tools/content_ingestion.py: NewsIngestionPipeline
-            ├── ensure_analyzer()  — create CU analyzer (idempotent)
-            ├── analyze_article()  — ContentUnderstandingClient.begin_analyze()
-            └── push_to_index()    — SearchClient.upload_documents()
-                        │
+            ├── ensure_analyzer()    — create CU analyzer (idempotent)
+            ├── analyze_article()    — ContentUnderstandingClient.begin_analyze()
+            └── write_to_blob()      — BlobServiceClient.upload_blob()
+                        │  structured .md file per article
                         ▼
-            Azure AI Search "va-loan-news" index
-            (separate from KB policy docs index)
-                        │
+            Azure Blob Storage "news-articles" container
+            (sha256(url)[:32].md filenames for deduplication)
+                        │  Foundry IQ crawls + auto-vectorizes
                         ▼
-            Foundry IQ KB — second knowledge source
+            Foundry IQ KB "kb-va-loan-concierge"
+            (knowledge source: ks-va-loan-news-articles)
                         │
                         ▼
             Advisor Agent (updated instructions)
 ```
+
+**Why blob storage output (not push-to-search-index):**
+Foundry IQ automatically crawls blob containers added as knowledge sources, chunks the
+content, generates embeddings, and updates the vector index — no manual embedding
+generation needed. This is simpler, cheaper, and aligns with how the static guidelines
+docs are handled. The blob IS the persistent store; the search index is managed by Foundry.
 
 **Feed sources** (`tools/feed_sources.json`):
 - VA Home Loans — `benefits.va.gov/homeloans/rss.asp` (VA circulars)
@@ -1518,17 +1526,31 @@ mcp-server/ingest_trigger.py  (timer + HTTP Azure Functions)
 - `PolicyUpdate` (generate, object: affected_area, change_description, effective_date)
 - `RelevanceToVeterans` (generate: one sentence)
 
-**News search index** (`va-loan-news`): separate from the KB policy docs index.
-Fields: id (key), url, source_name, source_type, ingested_at, title, publish_date,
-summary, relevance_to_veterans, rate_info, policy_update, content_vector (1536-dim HNSW).
-Push-based (Function writes directly) — no indexer needed.
+**Output format** — each article becomes a structured markdown blob:
+```markdown
+# {Title}
+**Published:** {date} | **Source:** {feed_name} | **Type:** {SourceType}
+## Summary
+{Summary}
+## Relevance to Veterans
+{RelevanceToVeterans}
+## Rate Information      ← only if SourceType == rate_change
+...
+## Policy Update         ← only if SourceType == policy_update or va_circular
+...
+```
 
-**Deduplication:** SHA-256 of article URL as document ID. `is_already_indexed()` checks
-before CU analysis — skips if present. CU failures per-article are logged and skipped
-(don't fail the batch).
+**Deduplication:** SHA-256 of article URL as blob filename (`{hash[:32]}.md`).
+`is_already_ingested()` checks blob existence before CU analysis — skips if present.
+CU failures per-article are logged and skipped (don't fail the batch).
 
 **Manual trigger:** `POST /ingest` HTTP function in `ingest_trigger.py` for testing
 without waiting 4 hours.
+
+**Blob containers** (in Storage Account):
+- `loan-guidelines` — static VA guidelines docs (KB source: `ks-loan-guidelines`)
+- `news-articles` — CU-ingested news markdown files (KB source: `ks-va-loan-news-articles`)
+- `deploymentpackage` — Flex Consumption Function App deployment packages
 
 **New env vars** (written by `postprovision.ps1`, also in `.env.example`):
 - `CU_ENDPOINT` — CU client endpoint (`services.ai.azure.com` format, from azd output `AI_SERVICES_ENDPOINT`)
@@ -1536,13 +1558,14 @@ without waiting 4 hours.
 - `CU_MINI_MODEL_DEPLOYMENT` — `gpt-4.1-mini` (required by CU defaults even if not used by this analyzer)
 - `CU_LARGE_EMBEDDING_DEPLOYMENT` — `text-embedding-3-large` (required by CU defaults)
 - `CU_ANALYZER_NAME` — `vaMortgageNews` (no hyphens — CU analyzer IDs cannot contain `-`)
-- `CU_NEWS_INDEX_NAME` — `va-loan-news`
+- `CU_NEWS_BLOB_CONTAINER` — `news-articles` (blob container name)
+- `STORAGE_ACCOUNT_ENDPOINT` — blob endpoint URL (e.g. `https://stvalcdemoeastus.blob.core.windows.net`)
 
 **What NOT to do:**
 - Do NOT use CU as a real-time agent tool — async batch processing only (seconds to minutes)
-- Do NOT bypass Foundry IQ — CU produces data, Foundry IQ provides agentic retrieval
+- Do NOT bypass Foundry IQ — CU produces blobs, Foundry IQ provides agentic retrieval + vectorization
 - Do NOT use the preview-only Pro mode (`2025-05-01-preview`)
-- Do NOT store ingested articles in blob — search index IS the persistent store
+- Do NOT push directly to the search index — Foundry IQ manages the index from blob storage
 
 **CU deployment notes (important for `azd up` reproducibility):**
 - `ensure_analyzer()` is called on each Function App startup (idempotent — skips if exists)
@@ -1551,36 +1574,42 @@ without waiting 4 hours.
   This avoids the limitation that Azure Functions cannot import from parent directories.
 - `function_app.py` imports `ingest_trigger` (after `app` is defined) to register timer + HTTP
   triggers on the shared FunctionApp instance (Azure Functions requires exactly one per worker)
-- Function App MI needs 4 roles: Cognitive Services User, Cognitive Services OpenAI User (on AI Services),
-  Search Index Data Contributor, Search Index Data Reader (on Search) — all added to `rbac.bicep`
+- Function App MI needs: Cognitive Services User + Cognitive Services OpenAI User (on AI Services),
+  Storage Blob Data Contributor (on Storage — for writing news markdown files) — all in `rbac.bicep`
 - Env var naming: all CU-specific vars are prefixed `CU_` to distinguish from the main agent pipeline vars
 - `CU_COMPLETION_DEPLOYMENT` and `FOUNDRY_MODEL_DEPLOYMENT` have the same value by default but are
   separate variables — CU could be configured to use a different/cheaper model than the agent pipeline
+- Adding `ks-va-loan-news-articles` as KB source is a **manual portal step** — Foundry IQ portal
+  does not support programmatic KB source management yet
+
+**Foundry IQ KB (`kb-va-loan-concierge`) — two knowledge sources:**
+| Source Name | Type | Container | Content |
+|---|---|---|---|
+| `ks-loan-guidelines` | Blob Storage | `loan-guidelines` | Static VA guidelines, lender products, FAQ |
+| `ks-va-loan-news-articles` | Blob Storage | `news-articles` | CU-ingested news markdown files |
 
 Items:
-- [x] Create `tools/content_ingestion.py` — `NewsIngestionPipeline` with CU + search push
+- [x] Create `tools/content_ingestion.py` — `NewsIngestionPipeline` with CU + blob write
 - [x] Create `tools/feed_sources.json` — 4 RSS feed sources
 - [x] Create `mcp-server/ingest_trigger.py` — timer (every 4h) + HTTP manual trigger
 - [x] Create `mcp-server/tools/` package — copy of content_ingestion.py + feed_sources.json for Function App
-- [x] Add `AI_SERVICES_ENDPOINT` output to `infra/main.bicep`
-- [x] Add `AI_SERVICES_ENDPOINT`, `CU_ANALYZER_NAME`, `NEWS_INDEX_NAME` to `postprovision.ps1` .env block
-- [x] Add `va-loan-news` search index creation to `postprovision.ps1` (step 10a)
+- [x] Add `AI_SERVICES_ENDPOINT`, `STORAGE_ACCOUNT_ENDPOINT`, `NEWS_CONTAINER_NAME` outputs to `infra/main.bicep`
+- [x] Add `CU_NEWS_BLOB_CONTAINER`, `STORAGE_ACCOUNT_ENDPOINT` to `postprovision.ps1` .env block
 - [x] Update `agents/advisor_agent.py` — news source instructions + publish date citation rule
-- [x] Add `azure-ai-contentunderstanding>=1.0.1`, `feedparser>=6.0.0` to `requirements.txt`
-- [x] Add same + `azure-search-documents`, `azure-identity` to `mcp-server/requirements.txt`
-- [x] Update `.env.example` with new vars (`CU_ENDPOINT`, `CU_COMPLETION_DEPLOYMENT`, `CU_MINI_MODEL_DEPLOYMENT`, `CU_LARGE_EMBEDDING_DEPLOYMENT`, `CU_ANALYZER_NAME`, `CU_NEWS_INDEX_NAME`)
+- [x] Add `azure-ai-contentunderstanding>=1.0.1`, `azure-storage-blob>=12.25.0`, `feedparser>=6.0.0` to `requirements.txt`
+- [x] Add same to `mcp-server/requirements.txt` (replaced `azure-search-documents`)
+- [x] Update `.env.example` with new vars (`CU_ENDPOINT`, `CU_COMPLETION_DEPLOYMENT`, `CU_MINI_MODEL_DEPLOYMENT`, `CU_LARGE_EMBEDDING_DEPLOYMENT`, `CU_ANALYZER_NAME`, `CU_NEWS_BLOB_CONTAINER`, `STORAGE_ACCOUNT_ENDPOINT`)
 - [x] Add `gpt-4.1-mini` and `text-embedding-3-large` deployments to `ai-services.bicep`
-- [x] Add Function App MI RBAC roles (Cognitive Services User, OpenAI User, Search Contributor, Search Reader) to `rbac.bicep`
+- [x] Add Function App MI RBAC: Cognitive Services User, OpenAI User, Storage Blob Data Contributor — to `rbac.bicep`
+- [x] Rename blob container `knowledge-base` → `loan-guidelines` in `storage.bicep` and portal
 - [x] Deploy updated Function App — `ingest_timer` + `ingest_now` registered and working
-- [x] Test: POST /ingest → 25 articles fetched, analyzed, indexed (2026-03-30)
+- [x] Test: POST /ingest → 25 articles fetched, analyzed, written to blob (2026-03-30)
 - [x] Test: POST /ingest again → 25 skipped (deduplication working)
-- [x] Test: search `va-loan-news` index → titles, dates, summaries, source types all correct
-- [ ] Add `va-loan-news` as second knowledge source to Foundry IQ KB (manual portal step)
-- [ ] Test: ask Advisor "What are current VA rates?" → news source cited with date
-- [ ] Test: timer trigger fires on 4-hour schedule (next fire: midnight UTC +4h)
-- [ ] Test: manually ingest sample VA news article → verify structured output
-- [ ] Test: ask Advisor "What are current VA loan rates?" → verify news source cited
-- [ ] Test: timer trigger fires on schedule and ingests new content
+- [x] Add `ks-va-loan-news-articles` as Blob Storage knowledge source to `kb-va-loan-concierge` KB (manual portal step — completed 2026-03-30)
+- [x] Test: "Any recent VA policy changes?" → pulls from news KB source (confirmed 2026-03-30)
+- [ ] Rename KB in portal from `kb-va-loan-guidelines` → `kb-va-loan-concierge` (portal rename may require recreation)
+- [ ] Update `ks-loan-guidelines` source to point to `loan-guidelines` container (currently may point to `knowledge-base`)
+- [ ] Test: timer trigger fires on 4-hour schedule
 
 ---
 
