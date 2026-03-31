@@ -3,24 +3,88 @@
     "name": "VA Home Loans",
     "url": "https://www.benefits.va.gov/homeloans/rss.asp",
     "source_type": "va_circular",
-    "mime_type": "application/rss+xml"
+    "mime_type": "application/rss+xml",
+    "category": "Regulatory & Policy",
+    "notes": "Official VA Home Loan benefit circulars and policy announcements"
   },
   {
     "name": "CFPB Newsroom",
     "url": "https://www.consumerfinance.gov/about-us/newsroom/feed/",
     "source_type": "policy_update",
-    "mime_type": "application/rss+xml"
+    "mime_type": "application/rss+xml",
+    "category": "Regulatory & Policy",
+    "notes": "CFPB press releases, enforcement actions, and mortgage rule updates"
+  },
+  {
+    "name": "CFPB Blog",
+    "url": "https://www.consumerfinance.gov/about-us/blog/feed/",
+    "source_type": "policy_update",
+    "mime_type": "application/rss+xml",
+    "category": "Regulatory & Policy",
+    "notes": "CFPB research, guidance, and consumer protection commentary"
   },
   {
     "name": "Freddie Mac PMMS",
     "url": "https://www.freddiemac.com/feeds/pmms/pmms30.xml",
     "source_type": "rate_change",
-    "mime_type": "application/rss+xml"
+    "mime_type": "application/rss+xml",
+    "category": "Market Trends",
+    "notes": "Primary Mortgage Market Survey — weekly 30-year fixed rate benchmark"
+  },
+  {
+    "name": "Mortgage News Daily",
+    "url": "https://feeds.feedburner.com/mortgagenewsdaily",
+    "source_type": "rate_change",
+    "mime_type": "application/rss+xml",
+    "category": "Market Trends",
+    "notes": "Daily mortgage rate commentary and market-moving event analysis"
+  },
+  {
+    "name": "National Mortgage News",
+    "url": "https://www.nationalmortgagenews.com/rss",
+    "source_type": "industry_news",
+    "mime_type": "application/xml",
+    "category": "Competitor & Industry Moves",
+    "notes": "Lender news, originator moves, servicing updates, and M&A activity"
+  },
+  {
+    "name": "HousingWire",
+    "url": "https://www.housingwire.com/feed/",
+    "source_type": "industry_news",
+    "mime_type": "application/rss+xml",
+    "category": "Competitor & Industry Moves",
+    "notes": "Housing finance industry news — lender strategy, technology, market shifts"
   },
   {
     "name": "MBA Mortgage News",
     "url": "https://www.mba.org/news-and-research/newsroom/rss",
     "source_type": "industry_news",
-    "mime_type": "application/rss+xml"
+    "mime_type": "application/rss+xml",
+    "category": "Industry Events",
+    "notes": "Mortgage Bankers Association — origination volume, advocacy, conference announcements"
+  },
+  {
+    "name": "U.S. Census Bureau Housing",
+    "url": "https://www.census.gov/newsroom/press-releases.xml",
+    "source_type": "market_trends",
+    "mime_type": "application/rss+xml",
+    "category": "Market Trends",
+    "notes": "New residential construction, housing starts, permits, and home sales data"
+  },
+  {
+    "name": "NY Fed Liberty Street Economics",
+    "url": "https://libertystreeteconomics.newyorkfed.org/feed/",
+    "source_type": "market_trends",
+    "mime_type": "application/rss+xml",
+    "category": "Market Trends",
+    "notes": "Federal Reserve research on housing finance, mortgage markets, and credit conditions"
+  },
+  {
+    "name": "Calculated Risk",
+    "url": "https://www.calculatedriskblog.com/feeds/posts/default",
+    "source_type": "market_trends",
+    "mime_type": "application/atom+xml",
+    "category": "Market Trends",
+    "notes": "Authoritative housing market data analysis — inventory, sales, prices, mortgage metrics"
   }
 ]
