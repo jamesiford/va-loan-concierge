@@ -289,8 +289,12 @@ class NewsletterAgent:
             yield {"type": "error", "message": f"Newsletter agent error: {exc}"}
             return
 
-        # Count citation markers as a proxy for article count.
+        # Count citation markers as a proxy for article count, then strip them.
+        # Foundry appends 【idx†source】 markers to responses — remove before display
+        # so only the inline *(Source: name, date)* citations the model writes remain.
         article_count = len(set(_CITATION_RE.findall(digest_text))) or "multiple"
+        clean_text = _CITATION_RE.sub("", digest_text).strip()
+
         yield {
             "type": "newsletter_tool_result",
             "message": f"Digest compiled — {article_count} source(s) referenced",
@@ -300,8 +304,8 @@ class NewsletterAgent:
             "message": "Market intelligence digest ready",
         }
 
-        # Final event: the full digest markdown for the orchestrator to render.
-        yield {"type": "_newsletter_text", "text": digest_text}
+        # Final event: the cleaned digest markdown for the orchestrator to render.
+        yield {"type": "_newsletter_text", "text": clean_text}
 
     # ── Cleanup ────────────────────────────────────────────────────────────
 

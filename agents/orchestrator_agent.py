@@ -575,8 +575,10 @@ class Orchestrator:
             return
 
         # ── Run newsletter agent ─────────────────────────────────────────
+        # No handoff divider here — newsletter is always the only agent in its
+        # routing path, and the plan event already names it. A handoff would be
+        # redundant ("Newsletter Agent" + "Orchestrator → Newsletter Agent" back-to-back).
         if needs_newsletter and self._newsletter:
-            yield {"type": "handoff", "message": "Orchestrator → Newsletter Agent"}
             with tracer.start_as_current_span("agent.newsletter"):
                 newsletter_text = ""
                 try:
