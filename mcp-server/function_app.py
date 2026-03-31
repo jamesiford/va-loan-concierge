@@ -4,7 +4,7 @@ Azure Functions entry point for the VA Loan MCP Server.
 This file is the Azure Functions entry point and owns the single FunctionApp
 instance.  All triggers in this package must register on this same `app` object.
 
-Two groups of triggers are defined here:
+Three groups of triggers are defined here:
 
   MCP trigger (this file):
     POST /mcp — MCP JSON-RPC handler for the Calculator and Scheduler agents.
@@ -15,9 +15,14 @@ Two groups of triggers are defined here:
     POST /ingest  — manual trigger for the news ingestion pipeline (Phase 14)
     Timer /4h     — automatic ingestion every 4 hours
 
-    ingest_trigger.py is imported AFTER `app` is defined so it can attach its
-    triggers to this same FunctionApp instance.  Azure Functions requires exactly
-    one FunctionApp per Python worker — creating a second one would cause a runtime error.
+  Newsletter triggers (newsletter_trigger.py — imported below):
+    POST /newsletter — manual/on-demand digest generation (Phase 15)
+    Timer Monday 9am — weekly market intelligence digest
+
+    Both trigger files are imported AFTER `app` is defined so they can attach
+    their triggers to this same FunctionApp instance.  Azure Functions requires
+    exactly one FunctionApp per Python worker — creating a second one would cause
+    a runtime error.
 
 MCP endpoint URL (written to .env as MCP_TOOLS_ENDPOINT by postprovision.ps1):
   https://<func-app-name>.azurewebsites.net/mcp
@@ -43,6 +48,10 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 # Import ingest_trigger AFTER `app` is defined — it calls @app.timer_trigger and
 # @app.route to register the news ingestion functions on this same app instance.
 import ingest_trigger  # noqa: F401, E402
+
+# Import newsletter_trigger AFTER `app` is defined — registers the weekly digest
+# timer and on-demand HTTP trigger on this same app instance.
+import newsletter_trigger  # noqa: F401, E402
 
 _PROTOCOL_VERSION = "2024-11-05"
 _SERVER_INFO = {"name": "va-loan-tools", "version": "1.0.0"}

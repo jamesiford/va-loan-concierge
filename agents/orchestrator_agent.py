@@ -12,8 +12,8 @@ Architecture:
                                          └──► CalendarAgent    (Work IQ Calendar)
 
 Routing is LLM-driven: the orchestrator is itself a registered Foundry agent
-that classifies each query via the Responses API into a 3-way boolean:
-  (needs_advisor, needs_calculator, needs_scheduler)
+that classifies each query via the Responses API into a 4-way boolean:
+  (needs_advisor, needs_calculator, needs_scheduler, needs_newsletter)
 
 Multiple may be true for mixed queries.  Keyword classification serves as a
 fallback if the LLM call fails.
@@ -41,6 +41,7 @@ from api.telemetry import get_tracer
 from agents.advisor_agent import AdvisorAgent
 from agents.calculator_agent import CalculatorAgent
 from agents.calendar_agent import CalendarAgent
+from agents.newsletter_agent import NewsletterAgent
 from agents.scheduler_agent import SchedulerAgent
 from api.conversation_state import (
     ConversationState,
@@ -88,19 +89,25 @@ agent(s) to invoke:
     — scheduling/booking an appointment with a loan officer, checking
       availability, creating calendar events, managing meetings.
 
+  Newsletter Agent (needs_newsletter: true)
+    — requests for a market intelligence digest, weekly summary, news briefing,
+      "send me the digest", "what's happening in the market", "weekly update",
+      "market intel", "latest VA news", "news summary".
+
 When asked to classify a query, respond with ONLY a valid JSON object:
-  {"needs_advisor": <bool>, "needs_calculator": <bool>, "needs_scheduler": <bool>, "response": <string>}
+  {"needs_advisor": <bool>, "needs_calculator": <bool>, "needs_scheduler": <bool>, "needs_newsletter": <bool>, "response": <string>}
 
 Multiple may be true for mixed queries (e.g. "Am I eligible AND show me my savings
 AND book Thursday").
 
 The "response" field:
-  — When ANY of the three flags is true, set "response" to "".
-  — When ALL three flags are false, the query is general or meta (e.g. "What can
+  — When ANY of the four flags is true, set "response" to "".
+  — When ALL four flags are false, the query is general or meta (e.g. "What can
     you do?", "Hello", "How does this work?"). Write a friendly, concise answer
-    describing your three capabilities: (1) answering VA loan eligibility and
-    guideline questions, (2) calculating refinance savings, and (3) scheduling
-    appointments with a loan officer. Invite the Veteran to ask a specific question.
+    describing your four capabilities: (1) answering VA loan eligibility and
+    guideline questions, (2) calculating refinance savings, (3) scheduling
+    appointments with a loan officer, and (4) generating a weekly market
+    intelligence digest. Invite the Veteran to ask a specific question.
 
 Do NOT default to needs_advisor for general/meta queries. Only set needs_advisor
 to true when the Veteran is asking a substantive VA loan question.
@@ -130,6 +137,13 @@ _SCHEDULER_KEYWORDS: frozenset[str] = frozenset({
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
 })
 
+_NEWSLETTER_KEYWORDS: frozenset[str] = frozenset({
+    "digest", "newsletter", "weekly", "market intel", "market intelligence",
+    "news summary", "news briefing", "latest news", "what's happening",
+    "market update", "weekly update", "send me the", "industry news",
+    "latest va news", "rate news", "policy news",
+})
+
 
 _GENERAL_RESPONSE = (
     "I'm your VA Loan Concierge! Here's what I can help you with:\n\n"
@@ -140,11 +154,13 @@ _GENERAL_RESPONSE = (
     "timeline, and closing costs if you're considering a refinance.\n\n"
     "3. **Appointment Scheduling** — I can book a consultation with a loan officer "
     "and add it to your calendar.\n\n"
+    "4. **Market Intelligence Digest** — I can generate a weekly summary of VA "
+    "mortgage market trends, regulatory updates, and industry news.\n\n"
     "What would you like to know?"
 )
 
 
-def _classify_hint(query: str) -> tuple[bool, bool, bool, str]:
+def _classify_hint(query: str) -> tuple[bool, bool, bool, bool, str]:
     """
     Keyword-based pre-classification for routing decisions.
     Returns general capabilities response when no keywords match.
@@ -153,12 +169,18 @@ def _classify_hint(query: str) -> tuple[bool, bool, bool, str]:
     needs_advisor = any(kw in q for kw in _ADVISOR_KEYWORDS)
     needs_calculator = any(kw in q for kw in _CALCULATOR_KEYWORDS)
     needs_scheduler = any(kw in q for kw in _SCHEDULER_KEYWORDS)
-    if not needs_advisor and not needs_calculator and not needs_scheduler:
-        return False, False, False, _GENERAL_RESPONSE
-    return needs_advisor, needs_calculator, needs_scheduler, ""
+    needs_newsletter = any(kw in q for kw in _NEWSLETTER_KEYWORDS)
+    if not needs_advisor and not needs_calculator and not needs_scheduler and not needs_newsletter:
+        return False, False, False, False, _GENERAL_RESPONSE
+    return needs_advisor, needs_calculator, needs_scheduler, needs_newsletter, ""
 
 
-def _route_label(needs_advisor: bool, needs_calculator: bool, needs_scheduler: bool) -> str:
+def _route_label(
+    needs_advisor: bool,
+    needs_calculator: bool,
+    needs_scheduler: bool,
+    needs_newsletter: bool,
+) -> str:
     agents = []
     if needs_advisor:
         agents.append("Advisor Agent")
@@ -166,6 +188,8 @@ def _route_label(needs_advisor: bool, needs_calculator: bool, needs_scheduler: b
         agents.append("Calculator Agent")
     if needs_scheduler:
         agents.append("Scheduler Agent")
+    if needs_newsletter:
+        agents.append("Newsletter Agent")
     return " + ".join(agents) if agents else "Concierge (general)"
 
 
@@ -199,6 +223,7 @@ class Orchestrator:
         self._calculator: CalculatorAgent | None = None
         self._scheduler: SchedulerAgent | None = None
         self._calendar: CalendarAgent | None = None
+        self._newsletter: NewsletterAgent | None = None
         self._orchestrator_version: str | None = None
 
     # ── Client Setup ───────────────────────────────────────────────────────
@@ -227,6 +252,7 @@ class Orchestrator:
         self._calculator = CalculatorAgent()
         self._scheduler = SchedulerAgent()
         self._calendar = CalendarAgent()
+        self._newsletter = NewsletterAgent()
 
         # Initialize sub-agents concurrently.
         await asyncio.gather(
@@ -234,6 +260,7 @@ class Orchestrator:
             self._calculator.initialize(),
             self._scheduler.initialize(),
             self._calendar.initialize(),
+            self._newsletter.initialize(),
         )
         logger.info("orchestrator: sub-agents ready")
 
@@ -261,13 +288,13 @@ class Orchestrator:
     # the query.  The LLM returns a JSON object with three boolean flags
     # and an optional general response string.
 
-    async def _llm_classify(self, query: str) -> tuple[bool, bool, bool, str]:
+    async def _llm_classify(self, query: str) -> tuple[bool, bool, bool, bool, str]:
         """
         Use the orchestrator Foundry agent to classify routing via LLM inference.
 
-        Returns (needs_advisor, needs_calculator, needs_scheduler, response).
-        When all three flags are false, ``response`` contains a general
-        capabilities message from the LLM. Otherwise ``response`` is "".
+        Returns (needs_advisor, needs_calculator, needs_scheduler, needs_newsletter, response).
+        When all four flags are false, ``response`` contains a general capabilities
+        message from the LLM. Otherwise ``response`` is "".
 
         Falls back to keyword classification if the LLM call fails or returns
         unparseable output.
@@ -282,8 +309,9 @@ class Orchestrator:
 
         classify_prompt = (
             "Classify the following Veteran's query. Respond with ONLY a JSON object "
-            "with four fields — needs_advisor (bool), needs_calculator (bool), "
-            "needs_scheduler (bool), and response (string) — and nothing else.\n\n"
+            "with five fields — needs_advisor (bool), needs_calculator (bool), "
+            "needs_scheduler (bool), needs_newsletter (bool), and response (string) "
+            "— and nothing else.\n\n"
             f'Query: "{query}"'
         )
 
@@ -309,15 +337,14 @@ class Orchestrator:
             needs_advisor = bool(data.get("needs_advisor", False))
             needs_calculator = bool(data.get("needs_calculator", False))
             needs_scheduler = bool(data.get("needs_scheduler", False))
+            needs_newsletter = bool(data.get("needs_newsletter", False))
             general_response = str(data.get("response", ""))
             logger.info(
-                "orchestrator: LLM routing — needs_advisor=%s  needs_calculator=%s  needs_scheduler=%s  has_response=%s",
-                needs_advisor,
-                needs_calculator,
-                needs_scheduler,
+                "orchestrator: LLM routing — advisor=%s  calculator=%s  scheduler=%s  newsletter=%s  has_response=%s",
+                needs_advisor, needs_calculator, needs_scheduler, needs_newsletter,
                 bool(general_response),
             )
-            return needs_advisor, needs_calculator, needs_scheduler, general_response
+            return needs_advisor, needs_calculator, needs_scheduler, needs_newsletter, general_response
         except Exception as exc:
             logger.warning(
                 "orchestrator: LLM classification failed, falling back to keywords: %s", exc
@@ -448,21 +475,21 @@ class Orchestrator:
             "orchestrator.classify",
             attributes={"query": query[:500]},
         ):
-            needs_advisor, needs_calculator, needs_scheduler, general_response = (
+            needs_advisor, needs_calculator, needs_scheduler, needs_newsletter, general_response = (
                 await self._llm_classify(query)
             )
         state.needs_advisor = needs_advisor
         state.needs_calculator = needs_calculator
         state.needs_scheduler = needs_scheduler
         await save_conversation(state)
-        route_label = _route_label(needs_advisor, needs_calculator, needs_scheduler)
+        route_label = _route_label(needs_advisor, needs_calculator, needs_scheduler, needs_newsletter)
         yield {
             "type": "orchestrator_route",
             "message": f"Routing to: {route_label}",
         }
 
         # ── General / meta query — respond directly, no sub-agents ─────
-        if not needs_advisor and not needs_calculator and not needs_scheduler:
+        if not needs_advisor and not needs_calculator and not needs_scheduler and not needs_newsletter:
             response_text = general_response or _GENERAL_RESPONSE
             yield {
                 "type": "partial_response",
@@ -482,6 +509,8 @@ class Orchestrator:
         if needs_scheduler:
             plan_agents.append("Loan Scheduler")
             plan_agents.append("Calendar")
+        if needs_newsletter:
+            plan_agents.append("Newsletter Agent")
         yield {
             "type": "plan",
             "message": " → ".join(plan_agents),
@@ -544,6 +573,31 @@ class Orchestrator:
                 ],
             }
             return
+
+        # ── Run newsletter agent ─────────────────────────────────────────
+        if needs_newsletter and self._newsletter:
+            yield {"type": "handoff", "message": "Orchestrator → Newsletter Agent"}
+            with tracer.start_as_current_span("agent.newsletter"):
+                newsletter_text = ""
+                try:
+                    async for event in self._newsletter.run():
+                        if event["type"] == "_newsletter_text":
+                            newsletter_text = event.get("text", "")
+                        else:
+                            yield event
+                except Exception as exc:
+                    logger.exception("orchestrator: newsletter run raised unexpectedly")
+                    yield {"type": "error", "message": f"Newsletter error: {exc}"}
+                    return
+
+            if newsletter_text:
+                has_response = True
+                yield {
+                    "type": "partial_response",
+                    "agent": "newsletter",
+                    "label": "Market Intelligence Digest",
+                    "content": newsletter_text,
+                }
 
         # ── Continue with calculator + scheduler ─────────────────────────
         async for event in self._run_calculator_through_end(state, has_response):
@@ -967,6 +1021,8 @@ class Orchestrator:
             await self._scheduler.close()
         if self._calendar:
             await self._calendar.close()
+        if self._newsletter:
+            await self._newsletter.close()
         if self._client:
             await self._client.close()
             self._client = None
