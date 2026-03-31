@@ -216,6 +216,71 @@ _ANALYZER_SCHEMA = ContentFieldSchema(
 # ═══════════════════════════════════════════════════════════════════════════════
 # NewsIngestionPipeline
 # ═══════════════════════════════════════════════════════════════════════════════
+#
+# Full pipeline walkthrough (call order):
+#
+#  ┌─────────────────────────────────────────────────────────────────────────┐
+#  │  STEP 0 — ensure_analyzer()   [one-time idempotent setup]               │
+#  │    - Call cu.get_analyzer(name) — skip if already exists (HTTP 200)     │
+#  │    - cu.update_defaults(model_deployments={...})                        │
+#  │        Maps model names → Azure deployment names (3 keys required):     │
+#  │        "gpt-4.1", "gpt-4.1-mini", "text-embedding-3-large"              │
+#  │    - cu.begin_create_analyzer(analyzer_id, resource=ContentAnalyzer)    │
+#  │        Creates the named analyzer with _ANALYZER_SCHEMA (7 fields)      │
+#  │        base_analyzer_id="prebuilt-document" handles HTML + plain text   │
+#  └─────────────────────────────────────────────────────────────────────────┘
+#                          │
+#                          ▼
+#  ┌─────────────────────────────────────────────────────────────────────────┐
+#  │  STEP 1 — run() → fetch_feeds()   [for every pipeline invocation]       │
+#  │    - Reads feed_sources.json (11 RSS feeds: VA, CFPB, Freddie Mac, etc) │
+#  │    - feedparser.parse(url) for each feed                                │
+#  │    - Normalizes each entry into a flat article dict:                    │
+#  │        {url, title, published, content_html, source_name, source_type}  │
+#  │    - Returns all articles as a flat list (typically 25-100 per run)     │
+#  └─────────────────────────────────────────────────────────────────────────┘
+#                          │
+#              ┌───────────┴───────────┐
+#              │  for each article...  │
+#              └───────────┬───────────┘
+#                          │
+#                          ▼
+#  ┌─────────────────────────────────────────────────────────────────────────┐
+#  │  STEP 2 — is_already_ingested(url)   [deduplication gate]               │
+#  │    - blob name = SHA-256(url)[:32] + ".md"                              │
+#  │    - blob_client.exists() checks the "news-articles" container          │
+#  │    - If blob exists → stats["skipped"] += 1 and continue to next        │
+#  └─────────────────────────────────────────────────────────────────────────┘
+#                          │ (not yet ingested)
+#                          ▼
+#  ┌─────────────────────────────────────────────────────────────────────────┐
+#  │  STEP 3 — analyze_article(article)   [CU structured extraction]         │
+#  │    - cu.begin_analyze(analyzer_id, inputs=[AnalysisInput(html, ...)])   │
+#  │    - poller.result() blocks until CU finishes (seconds per article)     │
+#  │    - _extract_field_value() recursively unwraps typed CU field objects  │
+#  │        into plain Python values (string, float, dict, list)             │
+#  │    - Returns dict: {Title, PublishDate, SourceType, Summary,            │
+#  │                     RateInfo, PolicyUpdate, RelevanceToVeterans}         │
+#  │    - On failure: logs warning, returns None → stats["errors"] += 1      │
+#  └─────────────────────────────────────────────────────────────────────────┘
+#                          │
+#                          ▼
+#  ┌─────────────────────────────────────────────────────────────────────────┐
+#  │  STEP 4 — write_to_blob(article, cu_fields)   [blob storage output]     │
+#  │    - Merges CU fields with original RSS metadata (fallback for nulls)   │
+#  │    - Renders structured markdown:                                        │
+#  │        # {Title}                                                         │
+#  │        Source / Type / Published / Ingested / URL                       │
+#  │        ## Summary                                                        │
+#  │        ## Relevance to Veterans                                          │
+#  │        ## Rate Information      ← only if RateInfo fields populated      │
+#  │        ## Policy Update         ← only if PolicyUpdate fields populated  │
+#  │    - blob_client.upload_blob(markdown, overwrite=True)                  │
+#  │    - Foundry IQ auto-vectorizes new blobs from the "news-articles"      │
+#  │      container (configured as KB source in the portal) — no manual      │
+#  │      embedding generation or index management needed                    │
+#  └─────────────────────────────────────────────────────────────────────────┘
+#
 
 class NewsIngestionPipeline:
     """

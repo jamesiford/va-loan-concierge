@@ -18,14 +18,14 @@ Source of truth:
   *** If you modify tools/content_ingestion.py, run postprovision.ps1 (or
       `azd up`) to sync the copy before publishing the Function App. ***
 
-Environment variables (set by postprovision.ps1 via az functionapp appsettings):
-  CU_ENDPOINT                  — AI Services endpoint for Content Understanding
-  CU_COMPLETION_DEPLOYMENT     — GPT deployment for field generation
-  CU_MINI_MODEL_DEPLOYMENT     — GPT-mini deployment (required by CU defaults)
+Environment variables (set by Bicep + postprovision.ps1):
+  CU_ENDPOINT                   — AI Services endpoint (services.ai.azure.com format)
+  CU_COMPLETION_DEPLOYMENT      — GPT deployment for CU field generation (e.g. gpt-4.1)
+  CU_MINI_MODEL_DEPLOYMENT      — GPT-mini deployment (required by CU defaults)
   CU_LARGE_EMBEDDING_DEPLOYMENT — Large embedding deployment (required by CU defaults)
-  CU_ANALYZER_NAME             — CU analyzer resource name
-  CU_NEWS_INDEX_NAME           — Azure AI Search index for ingested articles
-  ADVISOR_SEARCH_ENDPOINT      — Azure AI Search service endpoint
+  CU_ANALYZER_NAME              — CU analyzer resource name (e.g. vaMortgageNews)
+  CU_NEWS_BLOB_CONTAINER        — Blob container for news markdown output (e.g. news-articles)
+  STORAGE_ACCOUNT_ENDPOINT      — Storage account blob endpoint URL
 """
 
 import json
