@@ -1,8 +1,18 @@
 # VA Loan Concierge
 
-A multi-agent demo for a VA mortgage lender built on **Microsoft Foundry**. The application showcases three distinct Foundry capabilities — **Foundry IQ** (grounded knowledge-base RAG), **MCP** (live tool invocation via a custom Azure Function), and **Work IQ Calendar** (Microsoft-hosted MCP for M365 calendar management) — working together in a coordinated agent workflow.
+A multi-agent demo for a VA mortgage lender built on **Microsoft Foundry**. A single Veteran query routes across five specialized agents — each using a different Foundry capability — and synthesizes a unified response in real time.
 
-Two orchestration paths share the same sub-agents:
+**Foundry capabilities demonstrated:**
+- **Foundry IQ** — grounded RAG across three knowledge sources with inline citations
+- **Custom MCP** — live tool invocation via an Azure Function App (refi calculator + appointment scheduler)
+- **Work IQ Calendar** — Microsoft-hosted MCP creating real M365 calendar events
+- **Workflow Agent** — declarative YAML orchestration for Copilot Studio / Teams
+- **Content Understanding** — AI-structured VA mortgage news ingested from live RSS feeds into the knowledge base
+- **Human-in-the-Loop** — multi-turn conversations with calculator retry loops and appointment confirmation
+- **Persistent Session State** — Cosmos DB preserves conversation state across server restarts
+- **Guardrails & Evaluations** — four-layer content safety, OpenAI Evals API, and OpenTelemetry observability
+
+Two orchestration paths share the same six agents:
 - **React UI demo** — Python backend with real-time SSE streaming and an Agent Flow Log
 - **Copilot Studio / Teams** — Foundry Workflow Agent (declarative YAML, no container needed)
 
