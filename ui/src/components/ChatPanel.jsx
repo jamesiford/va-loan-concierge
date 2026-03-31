@@ -2,11 +2,11 @@ import { useRef, useEffect } from 'react';
 import ChatMessage from './ChatMessage';
 
 const DEMO_QUERIES = [
-  { label: 'IRRRL Eligibility',  query: 'Am I eligible for an IRRRL refinance?' },
-  { label: 'Reuse VA Benefit',   query: 'Can I use my VA loan benefit a second time?' },
-  { label: 'Calculate Refi',   query: 'Can you calculate my refinance loan savings?' },
-  { label: 'Schedule Call',   query: 'Can I schedule a call for Thursday?' },
-  { label: 'Refi + Book Call ★', query: "I'm thinking about refinancing — am I eligible for an IRRRL, and can you show me what I'd save and schedule a call for Thursday?" },
+  { label: 'IRRRL Eligibility',    query: 'Am I eligible for an IRRRL refinance?' },
+  { label: 'VA Funding Fee',       query: 'Am I exempt from the VA funding fee, and how is it calculated?' },
+  { label: 'Reuse VA Benefit',     query: 'Can I use my VA loan benefit a second time?' },
+  { label: 'Refi + Book Call ★',   query: "I'm thinking about refinancing — am I eligible for an IRRRL, and can you show me what I'd save and schedule a call for Thursday?" },
+  { label: 'Weekly Market Digest', query: 'Send me the weekly VA mortgage market intelligence digest.' },
 ];
 
 export default function ChatPanel({ messages, isStreaming, onSend }) {
