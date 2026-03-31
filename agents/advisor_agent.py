@@ -14,7 +14,7 @@ Architecture:
                                                     │
                                                     ▼
                                             Azure AI Search
-                                         (3 knowledge sources)
+                                         (11 knowledge sources + news)
 
 Connection setup (one-time per environment):
   initialize() creates a RemoteTool project connection via the Azure Resource

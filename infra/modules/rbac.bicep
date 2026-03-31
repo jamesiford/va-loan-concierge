@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// RBAC role assignments (14 total)
+// RBAC role assignments (15 total)
 // ---------------------------------------------------------------------------
 // All role assignments needed for the multi-agent demo to function.
 //

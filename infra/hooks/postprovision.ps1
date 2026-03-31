@@ -47,7 +47,19 @@ $STORAGE_TOKEN = (az account get-access-token --resource https://storage.azure.c
 $STORAGE_URL = "https://${STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
 Write-Host "Uploading knowledge documents to ${STORAGE_URL}/${KNOWLEDGE_CONTAINER}/"
 
-$docs = @("knowledge/va_guidelines.md", "knowledge/lender_products.md", "knowledge/loan_process_faq.md")
+$docs = @(
+    "knowledge/va_guidelines.md",
+    "knowledge/lender_products.md",
+    "knowledge/loan_process_faq.md",
+    "knowledge/va_funding_fee_tables.md",
+    "knowledge/va_entitlement_calculations.md",
+    "knowledge/va_minimum_property_requirements.md",
+    "knowledge/va_appraisal_and_tidewater.md",
+    "knowledge/va_coe_and_eligibility_documentation.md",
+    "knowledge/va_closing_costs_and_allowable_fees.md",
+    "knowledge/va_jumbo_and_renovation_loans.md",
+    "knowledge/va_state_overlays_and_lender_guidelines.md"
+)
 foreach ($doc in $docs) {
     if (-not (Test-Path $doc)) {
         Write-Host "  WARNING: $doc not found, skipping"

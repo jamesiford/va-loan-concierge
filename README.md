@@ -3,16 +3,17 @@
 A multi-agent demo for a VA mortgage lender built on **Microsoft Foundry**. A single Veteran query routes across five specialized agents — each using a different Foundry capability — and synthesizes a unified response in real time.
 
 **Foundry capabilities demonstrated:**
-- **Foundry IQ** — grounded RAG across three knowledge sources with inline citations
+- **Foundry IQ** — grounded RAG across 11 knowledge sources (VA guidelines + live news) with inline citations
 - **Custom MCP** — live tool invocation via an Azure Function App (refi calculator + appointment scheduler)
 - **Work IQ Calendar** — Microsoft-hosted MCP creating real M365 calendar events
 - **Workflow Agent** — declarative YAML orchestration for Copilot Studio / Teams
-- **Content Understanding** — AI-structured VA mortgage news ingested from live RSS feeds into the knowledge base
+- **Content Understanding** — AI-structured VA mortgage news ingested from 11 live RSS feeds into the knowledge base
 - **Human-in-the-Loop** — multi-turn conversations with calculator retry loops and appointment confirmation
 - **Persistent Session State** — Cosmos DB preserves conversation state across server restarts
+- **Newsletter Agent** — weekly VA mortgage market intelligence digest (5 sections, chat-rendered + weekly timer trigger)
 - **Guardrails & Evaluations** — four-layer content safety, OpenAI Evals API, and OpenTelemetry observability
 
-Two orchestration paths share the same six agents:
+Two orchestration paths share the same agents:
 - **React UI demo** — Python backend with real-time SSE streaming and an Agent Flow Log
 - **Copilot Studio / Teams** — Foundry Workflow Agent (declarative YAML, no container needed)
 
@@ -44,6 +45,7 @@ Two orchestration paths share the same six agents:
   - [Human-in-the-Loop — Multi-Turn Conversations](#human-in-the-loop--multi-turn-conversations)
   - [Memory Architecture — Two Layers](#memory-architecture--two-layers)
   - [Content Understanding — VA Mortgage News Pipeline](#content-understanding--va-mortgage-news-pipeline-phase-14)
+  - [Newsletter Agent — VA Mortgage Market Intelligence Digest](#newsletter-agent--va-mortgage-market-intelligence-digest-phase-15)
   - [Work IQ Calendar — M365 Integration](#work-iq-calendar--m365-integration-calendar-agent)
   - [Demo Borrower Profiles](#demo-borrower-profiles)
 - [Tech Stack](#tech-stack)
@@ -118,11 +120,12 @@ A Veteran borrower interacts with a single chat interface. A single query like:
 | Agent | Foundry Name | Capability | Purpose |
 |---|---|---|---|
 | Orchestrator | `va-loan-orchestrator` | New Foundry agent (Responses API) | LLM-driven routing — classifies each query and decides which agent(s) to invoke |
-| VA Loan Advisor | `va-loan-advisor-iq` | Foundry IQ via MCPTool | Answers eligibility, product, and process questions grounded in 3 knowledge sources |
+| VA Loan Advisor | `va-loan-advisor-iq` | Foundry IQ via MCPTool | Answers eligibility, product, and process questions grounded in 11 knowledge sources |
 | Loan Calculator | `va-loan-calculator-mcp` | Custom MCP via MCPTool | Runs refinance savings calculations via Azure-hosted MCP tools |
 | Loan Scheduler | `va-loan-scheduler-mcp` | Custom MCP via MCPTool | Books consultation appointments with loan officers via Azure-hosted MCP tools |
 | Calendar | `va-loan-calendar-mcp` | Work IQ Calendar via MCPTool | Creates calendar events on the Veteran's M365 calendar after appointment booking |
-| Workflow | `va-loan-concierge-workflow` | Foundry Workflow Agent | Declarative orchestration for Copilot Studio / Teams (routes to all sub-agents) |
+| Newsletter | `va-loan-newsletter-iq` | Foundry IQ via MCPTool | Generates weekly 5-section VA mortgage market intelligence digest from KB + news sources |
+| Workflow | `va-loan-concierge-workflow` | Foundry Workflow Agent | Declarative orchestration for Copilot Studio / Teams (routes to all sub-agents, v13) |
 
 ---
 
@@ -181,7 +184,7 @@ This creates the following Azure resources:
 | `news-articles` | CU-ingested VA mortgage news markdown files — Foundry IQ KB source 2 (Phase 14) |
 | `deploymentpackage` | Flex Consumption Function App deployment packages (runtime) |
 
-**RBAC role assignments** (14 total — all automated by `infra/modules/rbac.bicep`):
+**RBAC role assignments** (15 total — all automated by `infra/modules/rbac.bicep`):
 
 | Principal | Role | Resource | Why |
 |---|---|---|---|
@@ -228,7 +231,7 @@ The Advisor Agent requires a Foundry IQ Knowledge Base backed by the blob storag
 | Field | Value |
 |---|---|
 | **Name** | `kb-va-loan-concierge` |
-| **Description** | `VA Loan Concierge knowledge base for the Advisor Agent. Covers VA loan eligibility, IRRRL qualification, funding fees, entitlement calculations, lender products, the homebuying process, and live VA mortgage news ingested every 4 hours.` |
+| **Description** | `VA Loan Concierge knowledge base for the Advisor Agent. Covers VA loan eligibility, COE requirements, IRRRL qualification, funding fee tables, entitlement calculations, minimum property requirements, appraisal and Tidewater, closing costs, jumbo and renovation loans, state overlays, lender products, borrower FAQ, and live VA mortgage news ingested every 4 hours from 11 RSS feeds.` |
 
 4. Under **Knowledge sources**, click **+ Add source** → **Azure Blob Storage** (static loan guidelines):
 
@@ -237,7 +240,7 @@ The Advisor Agent requires a Foundry IQ Knowledge Base backed by the blob storag
 | **Name** | `ks-loan-guidelines` |
 | **Storage account** | `st{env}` |
 | **Container** | `loan-guidelines` |
-| **Source description** | `Static VA loan knowledge: eligibility guidelines, lender product details (IRRRL, Cash-Out Refi, VA Jumbo, VA Renovation), and borrower FAQ covering process steps, myths, and edge cases.` |
+| **Source description** | `Static VA loan knowledge: eligibility guidelines and COE requirements, lender products (IRRRL, Cash-Out Refi, VA Jumbo, VA Renovation), borrower FAQ, complete 2024/2025 funding fee tables and exemptions, entitlement calculations (basic/bonus/residual), minimum property requirements, appraisal and Tidewater Initiative, allowable closing costs and fees, jumbo and renovation loans, and state-specific lender overlays.` |
 
 5. Under **Retrieval settings**:
 
@@ -245,8 +248,8 @@ The Advisor Agent requires a Foundry IQ Knowledge Base backed by the blob storag
 |---|---|
 | **Output mode** | `Extractive data` |
 | **Reasoning effort** | `Low` |
-| **Retrieval instructions** | `You are answering questions from Veterans about VA home loans. Always search all knowledge sources to find relevant information. Prioritize VA guidelines for eligibility and regulatory questions. Use lender products for rate, pricing, and product-specific questions. Use the FAQ for process steps, common misconceptions, and edge cases. If multiple sources are relevant, synthesize them into a cohesive answer. Always cite which source supports each claim.` |
-| **Answer instructions** | `Provide clear, accurate answers grounded in the knowledge sources. Use a professional but approachable tone appropriate for Veterans. Structure longer answers with bullet points or numbered lists. When citing sources, reference the document name (e.g., va_guidelines.md). If information is not found in the knowledge base, say so clearly — do not speculate or invent facts. For calculations or scheduling requests, note that those are handled by separate specialist agents.` |
+| **Retrieval instructions** | `You are answering questions from Veterans and loan officers about VA home loans. Always search all knowledge sources to find relevant information. For eligibility and entitlement questions, check va_guidelines.md and va_entitlement_calculations.md. For funding fee questions, check va_funding_fee_tables.md. For property condition and appraisal questions, check va_minimum_property_requirements.md and va_appraisal_and_tidewater.md. For COE and documentation questions, check va_coe_and_eligibility_documentation.md. For closing cost questions, check va_closing_costs_and_allowable_fees.md. For jumbo or renovation loans, check va_jumbo_and_renovation_loans.md. For lender overlays and state rules, check va_state_overlays_and_lender_guidelines.md. For current rates and recent policy changes, check the news articles source and include the publication date. Synthesize across sources when relevant. Always cite which source supports each claim.` |
+| **Answer instructions** | `Provide clear, accurate answers grounded in the knowledge sources. Use a professional but approachable tone appropriate for Veterans. Structure longer answers with bullet points or numbered lists. When citing sources, reference the document name (e.g., va_funding_fee_tables.md) or news source with date (e.g., Freddie Mac PMMS — 2026-03-28). If information is not found in the knowledge base, say so clearly — do not speculate or invent facts. For calculations or scheduling requests, note that those are handled by separate specialist agents.` |
 
 6. Under **Model configuration**:
 
@@ -440,11 +443,12 @@ va-loan-concierge/
 │       └── postprovision.ps1    # All post-provision: blob upload, Search index, connections, MCP deploy, .env, agent registration
 │
 ├── agents/
-│   ├── orchestrator_agent.py    # Orchestrator — LLM routing + sub-agent coordination
-│   ├── advisor_agent.py         # Foundry IQ KB via MCPTool
+│   ├── orchestrator_agent.py    # Orchestrator — LLM routing + sub-agent coordination (5-way)
+│   ├── advisor_agent.py         # Foundry IQ KB via MCPTool (11 knowledge sources)
 │   ├── calculator_agent.py      # Custom MCP — refi savings calculator
 │   ├── scheduler_agent.py       # Custom MCP — appointment booking
-│   └── calendar_agent.py        # Work IQ Calendar MCP — M365 calendar events
+│   ├── calendar_agent.py        # Work IQ Calendar MCP — M365 calendar events
+│   └── newsletter_agent.py      # Foundry IQ — weekly VA mortgage market intelligence digest
 │
 ├── api/
 │   ├── server.py                # FastAPI — POST /api/chat SSE endpoint
@@ -452,15 +456,18 @@ va-loan-concierge/
 │   └── conversation_state.py    # Persistent HIL state (Cosmos DB or in-memory fallback)
 │
 ├── tools/                       # Shared pipeline utilities (used by backend + Function App)
-│   ├── content_ingestion.py     # NewsIngestionPipeline — CU analyzer + search push (Phase 14)
-│   └── feed_sources.json        # RSS feed configs (VA, CFPB, Freddie Mac, MBA)
+│   ├── content_ingestion.py     # NewsIngestionPipeline — CU analyzer + blob write (Phase 14)
+│   ├── feed_sources.json        # 11 RSS feed configs (VA, CFPB, Freddie Mac, MBA, HousingWire...)
+│   └── newsletter_tool.py       # send_digest() — ACS Email SDK (Phase 15b, planned)
 │
 ├── mcp-server/                  # Azure Function App — custom MCP server
-│   ├── function_app.py          # Entry point — MCP JSON-RPC handler + imports ingest_trigger
+│   ├── function_app.py          # Entry point — MCP JSON-RPC handler + imports triggers
 │   ├── server.py                # Tool implementations + inputSchema definitions
 │   ├── ingest_trigger.py        # Timer (4h) + HTTP /ingest triggers (Phase 14)
-│   ├── tools/                   # Copy of repo-root tools/ — synced by postprovision.ps1
-│   │   ├── content_ingestion.py #   (do not edit here — edit tools/ at repo root)
+│   ├── newsletter_trigger.py    # Timer (Mon 09:00 UTC) + HTTP /newsletter trigger (Phase 15)
+│   ├── newsletter_agent.py      # Synced copy of agents/newsletter_agent.py (flat layout)
+│   ├── tools/                   # Synced copies of repo-root tools/ — via postprovision.ps1
+│   │   ├── content_ingestion.py #   (source of truth: tools/content_ingestion.py)
 │   │   └── feed_sources.json
 │   ├── host.json                # routePrefix: "" → endpoint at /mcp
 │   └── requirements.txt
@@ -473,10 +480,18 @@ va-loan-concierge/
 ├── scripts/
 │   └── create_guardrails.ps1    # Standalone guardrail policy creation
 │
-├── knowledge/                   # Knowledge base source documents
-│   ├── va_guidelines.md         # VA eligibility rules, IRRRL, funding fees
+├── knowledge/                   # Knowledge base source documents (11 files, uploaded to blob)
+│   ├── va_guidelines.md         # VA eligibility rules, IRRRL, COE requirements
 │   ├── lender_products.md       # Lender loan products and overlays
-│   └── loan_process_faq.md      # Borrower FAQ and edge cases
+│   ├── loan_process_faq.md      # Borrower FAQ and edge cases
+│   ├── va_funding_fee_tables.md          # 2024/2025 fee tables, exemptions, NTB recoupment
+│   ├── va_entitlement_calculations.md    # Basic/bonus entitlement, residual formula
+│   ├── va_minimum_property_requirements.md  # MPRs, safety/soundness, lead paint
+│   ├── va_appraisal_and_tidewater.md     # NOV, Tidewater Initiative, ROV 2024 changes
+│   ├── va_coe_and_eligibility_documentation.md  # COE methods, service documentation
+│   ├── va_closing_costs_and_allowable_fees.md   # 1% cap, prohibited fees, concessions
+│   ├── va_jumbo_and_renovation_loans.md  # High-balance, EEM, renovation
+│   └── va_state_overlays_and_lender_guidelines.md  # Credit overlays, residual income
 │
 ├── ui/                          # React frontend
 │   └── src/
@@ -565,7 +580,7 @@ An Azure Content Understanding (CU) pipeline ingests live VA mortgage news from 
 
 **How it works:**
 1. An **Azure Functions timer trigger** (`ingest_timer`) runs every 4 hours
-2. `feedparser` fetches articles from 4 configured RSS feeds (VA Home Loans, CFPB, Freddie Mac PMMS, MBA Mortgage News)
+2. `feedparser` fetches articles from 11 configured RSS feeds (VA Home Loans, CFPB, Freddie Mac PMMS, Mortgage News Daily, HousingWire, National Mortgage News, MBA, Census Bureau Housing, NY Fed, Calculated Risk)
 3. Each article is submitted to a **custom CU analyzer** (`vaMortgageNews`) that uses `gpt-4.1` to extract 7 structured fields:
    - `Title`, `PublishDate` (extracted), `SourceType` (classified into 5 categories)
    - `Summary`, `RateInfo`, `PolicyUpdate`, `RelevanceToVeterans` (generated)
@@ -607,6 +622,34 @@ curl -X POST https://func-{env}.azurewebsites.net/ingest
 - `mcp-server/tools/` — copy of the above, synced by `postprovision.ps1` before deploy
 
 > **Keeping `mcp-server/tools/` in sync:** The Function App cannot import from parent directories, so `tools/content_ingestion.py` is copied to `mcp-server/tools/` automatically by `postprovision.ps1` before each Function App publish. Never edit `mcp-server/tools/` directly — edit `tools/content_ingestion.py` at the repo root instead. Running `azd up` keeps everything synchronized.
+
+### Newsletter Agent — VA Mortgage Market Intelligence Digest (Phase 15)
+
+The Newsletter Agent generates a structured weekly digest of VA mortgage news organized into five sections, drawing from both the static knowledge base (11 VA topic files) and the live news articles ingested by the Phase 14 CU pipeline.
+
+**Five digest sections:**
+1. **Market Trends** — rate movements, housing data, Fed activity
+2. **Regulatory & Policy** — CFPB actions, VA circulars, compliance changes
+3. **Competitor & Industry Moves** — lender news, M&A, originator moves
+4. **Client & Partner News** — MBA, trade associations, service provider updates
+5. **Industry Events** — conferences, advocacy calendar
+
+Each item uses the format: `- **[Title]** — summary. *Why it matters:* leadership implication. *(Source: name, date)*`
+
+**Triggering the digest:**
+```bash
+# On-demand via HTTP (deployed Function App):
+curl -X POST https://func-{env}.azurewebsites.net/newsletter
+# Returns: {"agent": "newsletter", "digest": "# VA Mortgage Market Intelligence...", "timestamp": "..."}
+
+# Chat UI:
+# Ask: "Send me the weekly VA mortgage market intelligence digest."
+# → newsletter_start → newsletter_tool_call → newsletter_complete events stream in Agent Flow Log
+```
+
+**Automatic weekly digest:** A timer trigger (`newsletter_timer`) runs every Monday at 09:00 UTC and logs the generated digest. Phase 15b will add email delivery via ACS.
+
+**Architecture note:** The Function App's `newsletter_trigger.py` calls `resolve_version()` instead of `initialize()` — it looks up the latest existing Foundry agent version rather than creating a new one. The Python backend (`api/server.py`) is the sole owner of agent registration. If the backend has never been started, the Function App will raise a clear error rather than silently creating a divergent agent version.
 
 ### Work IQ Calendar — M365 Integration (Calendar Agent)
 
@@ -655,24 +698,25 @@ Three selectable profiles inject personalized context into every agent query:
 
 | Capability | Demonstrated By |
 |---|---|
-| Foundry IQ / grounded RAG | Advisor Agent answering from 3 knowledge sources with inline citations |
+| Foundry IQ / grounded RAG | Advisor Agent answering from 11 knowledge sources (VA guidelines + news) with inline citations |
 | Custom MCP server | Azure Function App implementing MCP JSON-RPC — no SDK dependency |
 | Work IQ Calendar | Calendar Agent creating M365 events via Microsoft-hosted MCP |
-| Multi-agent orchestration | Single query routed to four specialized agents, responses synthesized |
-| LLM-driven routing | Orchestrator Foundry agent classifies intent via Responses API |
-| New Foundry agent API | All five agents registered via `create_version` + `PromptAgentDefinition` |
+| Multi-agent orchestration | Single query routed to five specialized agents, responses synthesized |
+| LLM-driven routing | Orchestrator classifies intent via Responses API — 5-way routing (advisor/calculator/scheduler/newsletter/general) |
+| New Foundry agent API | All agents registered via `create_version` + `PromptAgentDefinition` |
 | Real-time streaming | Every agent step streamed to the browser as SSE events |
 | Infrastructure-as-code | `azd up` provisions everything; `azd down` tears it all down |
 | Human-in-the-loop | Multi-turn conversations with calculator retry loops and appointment confirmation |
 | Persistent session state | Cosmos DB preserves HIL conversation state across server restarts (dual-backend with in-memory fallback) |
 | Profile-aware responses | Borrower context injected per-query; calculator uses real loan parameters |
 | Governed, citable AI | Every factual claim traces back to a specific knowledge document |
-| Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams — hardened with HIL parity, graceful fallbacks, and isolated agent contexts |
+| Workflow agent | Declarative YAML orchestration for Copilot Studio / Teams — hardened with HIL parity, graceful fallbacks, isolated agent contexts, newsletter routing (v13) |
 | Guardrails & content safety | Four defense layers: per-agent Foundry guardrails (tool call + PII scanning), content filter IaC, agent instruction rules, MCP input validation |
 | Agent evaluations | OpenAI Evals API targeting registered agents server-side — task adherence, groundedness, coherence, relevance; results visible in Foundry portal (Build > Evaluations) |
 | Observability | Two-layer tracing: Foundry portal (LLM I/O, tool calls, tokens) + App Insights (HTTP requests, agent timing, routing decisions) via OpenTelemetry |
 | Agent Framework best practices | Orchestration uses `agent_reference` + Responses API — the canonical Microsoft Agent Framework pattern. ConnectedAgentTool (deprecated, classic API), A2APreviewTool (cross-system only), and Microsoft Agent Framework OSS (overkill for sequential pipeline) intentionally not used |
-| Content Understanding | Azure Content Understanding GA Foundry Tool — custom CU analyzer extracts structured fields from RSS articles using `gpt-4.1`; timer-triggered Azure Function ingests VA mortgage news every 4 hours; Advisor cites live news with dates alongside static KB sources |
+| Content Understanding | CU analyzer extracts structured fields from 11 RSS feeds; timer-triggered Function ingests VA mortgage news every 4 hours; Advisor cites live news with dates alongside static KB |
+| Newsletter Agent | Weekly VA mortgage market intelligence digest — 5 sections (market trends, regulatory, competitor, partner, events); chat-rendered + Monday 09:00 UTC timer trigger + `POST /newsletter` on-demand |
 
 ---
 
@@ -693,12 +737,13 @@ Three selectable profiles inject personalized context into every agent query:
 | 10 | Observability | Two-layer tracing: Foundry portal (automatic) + App Insights via OpenTelemetry (per-agent spans, routing timing, conversation audit), 90-day retention |
 | 13 | Persistent State (Cosmos DB) | HIL conversations survive server restarts — Cosmos DB NoSQL Serverless with dual-backend (in-memory fallback for tests), async SDK, TTL-based expiry, data-plane RBAC |
 | 14 | Content Understanding | Live VA mortgage news ingestion — CU analyzer + timer-triggered Azure Function → `news-articles` blob container → Foundry IQ KB second source (auto-vectorized); `gpt-4.1` generates summaries, rate info, policy updates, veteran relevance; 4-hour timer + HTTP `/ingest` manual trigger |
+| 15 | Newsletter Agent | Weekly VA mortgage market intelligence digest — 5-section structured output from KB + news sources; chat-rendered in UI; Monday 09:00 UTC timer trigger; `POST /newsletter` on-demand; `workflow.yaml` v13 parity; 11 knowledge docs (8 new VA topics); 11 RSS feeds; `resolve_version()` pattern for Function App agent lookup |
 
-### Up Next (independent — can start now)
+### Up Next — Phase 15b (no blockers)
 
 | Phase | Name | Goal | Key Changes |
 |---|---|---|---|
-| **15** | **Newsletter Agent** | On-demand email summaries of VA news to Veterans or loan officers | New outbound agent — Azure Communication Services email via MCP tool; orchestrator routes "send me the latest" queries; wired into existing `va-loan-news` index from Phase 14 |
+| **15b** | **ACS Email Delivery** | Email the weekly newsletter digest to configured recipients | `infra/modules/communication-services.bicep` (ACS + Email Services + Azure-managed domain); `tools/newsletter_tool.py` (ACS Email SDK, connection string auth); timer trigger calls `send_digest()` after agent runs; `NEWSLETTER_RECIPIENTS` in `.env` |
 
 ### Planned (blocked on Phase 9)
 

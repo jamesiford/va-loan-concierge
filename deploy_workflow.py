@@ -1,8 +1,8 @@
 """
 Deploy the VA Loan Concierge workflow agent to Azure AI Foundry.
 
-Registers all five sub-agents (orchestrator, advisor, calculator, scheduler,
-calendar) and uploads the workflow YAML as a WorkflowAgentDefinition.
+Registers all six sub-agents (orchestrator, advisor, calculator, scheduler,
+newsletter, calendar) and uploads the workflow YAML as a WorkflowAgentDefinition.
 
 Prerequisites:
   - az login (DefaultAzureCredential uses AzureCliCredential locally)
@@ -40,6 +40,7 @@ class _WorkflowPreviewPolicy(SansIOHTTPPolicy):
 from agents.advisor_agent import AdvisorAgent
 from agents.calculator_agent import CalculatorAgent
 from agents.calendar_agent import CalendarAgent
+from agents.newsletter_agent import NewsletterAgent
 from agents.scheduler_agent import SchedulerAgent
 
 load_dotenv()
@@ -109,11 +110,13 @@ async def main() -> None:
     advisor = AdvisorAgent()
     calculator = CalculatorAgent()
     scheduler = SchedulerAgent()
+    newsletter = NewsletterAgent()
 
     init_tasks = [
         advisor.initialize(),
         calculator.initialize(),
         scheduler.initialize(),
+        newsletter.initialize(),
     ]
 
     # Calendar agent requires manual Work IQ Calendar connection — skip if not configured
@@ -126,10 +129,11 @@ async def main() -> None:
 
     await asyncio.gather(*init_tasks)
     logger.info(
-        "Sub-agents registered — advisor=%s, calculator=%s, scheduler=%s, calendar=%s",
+        "Sub-agents registered — advisor=%s, calculator=%s, scheduler=%s, newsletter=%s, calendar=%s",
         advisor.agent_version,
         calculator.agent_id,
         scheduler.agent_id,
+        newsletter.agent_version,
         calendar.agent_id if calendar else "SKIPPED",
     )
 
@@ -160,7 +164,7 @@ async def main() -> None:
 
     workflow_version = await client.agents.create_version(
         agent_name="va-loan-concierge-workflow",
-        description="VA Loan Concierge — multi-agent workflow (advisor + calculator + scheduler + calendar)",
+        description="VA Loan Concierge — multi-agent workflow (advisor + calculator + scheduler + newsletter + calendar)",
         definition=WorkflowAgentDefinition(workflow=workflow_yaml),
     )
     logger.info(

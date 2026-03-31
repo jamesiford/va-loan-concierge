@@ -663,13 +663,15 @@ The default `python main.py` run executes the flagship demo query:
 
 | Capability | Demonstrated By |
 |---|---|
-| **Foundry IQ / grounded RAG** | Advisor Agent answering from 3 knowledge sources with citations |
-| **Multi-source knowledge base** | VA guidelines + lender products + borrower FAQ all queried simultaneously |
+| **Foundry IQ / grounded RAG** | Advisor Agent answering from 11 knowledge sources with citations |
+| **Multi-source knowledge base** | VA guidelines (11 topics) + news articles queried simultaneously |
 | **Custom MCP server** | Calculator and Scheduler agents calling tools via Azure Function App MCP |
 | **Work IQ Calendar** | Calendar Agent creating M365 events via Microsoft-hosted MCP |
-| **Multi-agent orchestration** | Single user query routed to four specialized agents, responses synthesized |
+| **Multi-agent orchestration** | Single user query routed to five specialized agents, responses synthesized |
 | **Governed, citable AI** | Every factual claim traces back to a specific knowledge document |
 | **Actionable AI** | Demo ends with real outputs (savings numbers + booked appointment + calendar event) |
+| **Market intelligence pipeline** | Newsletter Agent queries KB + news index for weekly VA mortgage digest |
+| **Content Understanding ingestion** | Azure CU processes RSS feeds → structured markdown → Foundry IQ KB |
 
 ---
 
@@ -1690,22 +1692,94 @@ Email delivery via Azure Communication Services — add after chat digest verifi
 - New env vars: `ACS_ENDPOINT`, `NEWSLETTER_SENDER`, `NEWSLETTER_RECIPIENTS`
 - Newsletter timer trigger calls `send_digest()` after agent produces markdown
 
+**Architecture fixes (resolved during Phase 15):**
+- `resolve_version()` pattern — Function App uses `list_versions(DESC, limit=1)` to look up the
+  latest existing Foundry agent version instead of calling `create_version()`. Backend is sole
+  owner of agent registration. If agent doesn't exist (backend never started), Function App
+  raises `RuntimeError` with clear message.
+- `mcp-server/newsletter_agent.py` — copy of `agents/newsletter_agent.py` required because
+  Azure Functions flat deployment cannot import from parent directories.
+- `postprovision.ps1` sync step: `Copy-Item "agents/newsletter_agent.py" "mcp-server/newsletter_agent.py"`
+  runs before `func azure functionapp publish` to keep the copy current.
+- `function-app.bicep` + `main.bicep` now wire `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_PROJECT_RESOURCE_ID`,
+  `ADVISOR_KNOWLEDGE_BASE_NAME`, `ADVISOR_SEARCH_ENDPOINT`, `ADVISOR_MCP_CONNECTION` into Function App
+  settings so `resolve_version()` works without manual `az functionapp config appsettings set`.
+- `workflow.yaml` — added `check_newsletter` ConditionGroup (v13); updated general query
+  condition to exclude newsletter; redeployed via `deploy_workflow.py`.
+- `tools/feed_sources.json` sync fix — `mcp-server/tools/feed_sources.json` was stale at 4
+  feeds; synced to 11 feeds and redeployed before running ingest.
+
 Items:
 - [x] Create `agents/newsletter_agent.py` — `NewsletterAgent` with 5-section instructions
 - [x] Create `mcp-server/newsletter_trigger.py` — timer (Mon 09:00 UTC) + POST /newsletter
 - [x] Update `mcp-server/function_app.py` — register newsletter_trigger on shared FunctionApp
-- [x] Update `agents/orchestrator_agent.py` — 4-way routing + newsletter execution block
+- [x] Update `agents/orchestrator_agent.py` — 5-way routing (advisor/calculator/scheduler/newsletter/general) + newsletter execution block
 - [x] Update `tools/feed_sources.json` — expanded from 4 to 11 verified RSS feeds
-- [x] Update `agents/advisor_agent.py` — reference all 10 knowledge files by name
+- [x] Update `agents/advisor_agent.py` — reference all 11 knowledge files by name
 - [x] Create 8 new knowledge files (va_funding_fee_tables.md, va_entitlement_calculations.md, etc.)
 - [x] Update `.env.example` — Phase 15 section (ACS vars commented as Phase 15b)
 - [x] Update `tests/test_orchestrator.py` — 5-tuple routing (114 tests passing)
 - [x] Upload all 11 knowledge docs to `loan-guidelines` blob container (2026-03-31)
 - [x] Deploy Function App — `newsletter_now` + `newsletter_timer` registered (2026-03-31)
+- [x] Fix `resolve_version()` pattern — Function App looks up existing agent, backend registers
+- [x] Sync `mcp-server/newsletter_agent.py` — copy of agents/newsletter_agent.py for flat layout
+- [x] Wire Foundry/KB env vars into `function-app.bicep` for `azd up` reproducibility
+- [x] Add `check_newsletter` ConditionGroup to `workflow.yaml` (v13) — parity with Python orchestrator
+- [x] Update `ui/src/components/FlowEvent.jsx` — 4 new newsletter event types
+- [x] Update `ui/src/components/ChatPanel.jsx` — 5th demo button "Weekly Market Digest"
+- [x] Trigger re-ingest with corrected 11-feed `feed_sources.json` (2026-03-31)
 - [ ] Test: chat query "send me the weekly digest" → digest rendered in UI
-- [ ] Test: POST /newsletter → JSON digest returned
-- [ ] Test: KB indexer re-runs on new blobs (or trigger manually in portal)
-- [ ] Phase 15b: ACS email delivery
+- [ ] Test: KB indexer re-runs on new blobs → Advisor answers from news source with date
+- [ ] Phase 15b: ACS email delivery (see below)
+
+**Phase 15b — ACS Email Delivery (next up):**
+
+Email delivery via Azure Communication Services. The weekly timer trigger already generates
+the digest — Phase 15b adds the email send step. HTTP trigger gains optional `?send=true`
+flag for on-demand email testing.
+
+Architecture:
+```
+newsletter_timer (Mon 09:00 UTC):
+    NewsletterAgent.run() → markdown digest
+        │
+        ▼
+    send_digest(subject, body_html, recipients)
+        │  ACS EmailClient (connection string auth)
+        ▼
+    ACS Email → SMTP delivery to NEWSLETTER_RECIPIENTS
+```
+
+Files to create:
+- `infra/modules/communication-services.bicep` — ACS account + Email Services resource +
+  Azure-managed domain (azurecomm.net); outputs: `acsEndpoint`, `acsConnectionString`, `senderAddress`
+- `tools/newsletter_tool.py` — `send_digest(subject: str, body_html: str, recipients: list[str])`.
+  Uses `azure-communication-email` SDK with connection string auth (ACS does not support MI auth).
+  Converts markdown to HTML via `markdown` package.
+
+Files to modify:
+- `infra/main.bicep` — add `module communicationServices`; outputs `ACS_ENDPOINT`, `ACS_SENDER`
+- `infra/hooks/postprovision.ps1` — write `ACS_ENDPOINT`, `ACS_SENDER`,
+  `ACS_CONNECTION_STRING` to `.env`; set on Function App via `az functionapp config appsettings set`
+- `mcp-server/newsletter_trigger.py` — timer calls `send_digest()` after `agent.run()`;
+  HTTP trigger gains `?send=true` query param to optionally email on-demand
+- `mcp-server/requirements.txt` — add `azure-communication-email>=1.0.0`, `markdown>=3.7`
+- `requirements.txt` — add `azure-communication-email>=1.0.0`, `markdown>=3.7`
+- `.env.example` — uncomment `ACS_ENDPOINT`, `ACS_SENDER`; add `ACS_CONNECTION_STRING`,
+  `NEWSLETTER_RECIPIENTS` (comma-separated email list, set manually)
+
+Key implementation notes:
+- ACS Email uses connection string auth — not managed identity. The connection string
+  includes the endpoint + access key. Store in `.env` (not committed).
+- Azure-managed domain (`azurecomm.net`) requires no DNS configuration — ready immediately.
+  Custom domain (company email) is available but requires DNS TXT/CNAME records.
+- `send_digest()` should be idempotent — safe to call multiple times (ACS deduplicates by
+  message ID if the same ID is used within 15 minutes).
+- `NEWSLETTER_RECIPIENTS` is a manual `.env` entry — not auto-provisioned (recipient list
+  is business configuration, not infrastructure).
+- `mcp-server/tools/newsletter_tool.py` — same sync pattern as `content_ingestion.py`:
+  `tools/newsletter_tool.py` is source of truth; `postprovision.ps1` copies to `mcp-server/tools/`
+  before publish.
 
 ---
 
@@ -1829,7 +1903,7 @@ Items:
 
 ### Phase Sequencing
 
-Phases 1–8 + 10 + 13 + 14 are complete. Phases 9–12 + 15–16 bring production readiness and new capabilities.
+Phases 1–8 + 10 + 13 + 14 + 15 are complete. Phases 9–12 + 15b + 16 bring production readiness and new capabilities.
 Each `azd up` leaves the system fully working.
 
 ```
@@ -1838,15 +1912,15 @@ Completed:
   → Phase 4 (MCP Server) → Phase 5 (Workflow Agent) → Phase 6 (IaC)
   → Phase 7 (Guardrails) → Phase 8 (Evaluations) → Phase 10 (Observability)
   → Phase 13 (Cosmos DB State) → Phase 14 (Content Understanding)
+  → Phase 15 (Newsletter Agent — chat digest + weekly timer, 2026-03-31)
 
 Planned (existing, blocked on Phase 9):
   Phase 9 (Web App)       ← DEFERRED (VM quota); demo runs locally
       ├── Phase 11 (Auth)          — requires Phase 9 (App Service for Easy Auth)
       └── Phase 12 (Network)       — requires Phase 9 (VNet integration needs App Service)
 
-Completed (independent):
-  Phase 15 (Newsletter Agent) ← chat-rendered digest, consumes Phase 14 news index (2026-03-31)
-      └── Phase 15b (ACS Email Delivery) ← planned next; verify chat digest first
+Next up (independent):
+  Phase 15b (ACS Email Delivery) ← email send for newsletter digest; no blockers
 
 Planned (requires Phase 11):
   Phase 16 (Foundry Memory Stores) ← cross-session Veteran memory (requires auth)
