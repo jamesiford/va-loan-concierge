@@ -745,10 +745,10 @@ Workflow Agent. The workflow YAML has been hardened (simplified from 740 to ~289
 Power Fx fixes, conversationId isolation, graceful HIL fallbacks) and validated in the
 Foundry playground.
 
-**Completed:** Phases 1–8 + 10 + 13 + 14 (foundation, agents, MCP, Foundry IQ, workflow agent, IaC,
-guardrails, evaluations, observability, Cosmos DB state, content understanding / news ingestion)
-+ HIL orchestration + workflow hardening.
-**Next (independent, can start now):** Phase 15 (Newsletter Agent — consumes Phase 14 news index).
+**Completed:** Phases 1–8 + 10 + 13 + 14 + 15 (foundation, agents, MCP, Foundry IQ, workflow agent,
+IaC, guardrails, evaluations, observability, Cosmos DB state, content understanding / news ingestion,
+Newsletter Agent) + HIL orchestration + workflow hardening + knowledge base expansion (10 VA topics).
+**Next:** Phase 15b (ACS email delivery for newsletter) — planned after chat-rendered digest verified.
 **Blocked on Phase 9 (VM quota):** Phase 11 (auth) → 12 (network isolation).
 **Blocked on Phase 11 (auth):** Phase 16 (Foundry Memory Stores — cross-session Veteran memory).
 **Validated (not a phase):** Orchestration patterns confirmed as Microsoft Agent Framework
@@ -1613,6 +1613,102 @@ Items:
 
 ---
 
+### Phase 15. Newsletter Agent — VA Mortgage Market Intelligence Digest — ✅ COMPLETE (2026-03-31)
+
+**Goal:** Add an outbound market intelligence capability: a weekly digest of VA mortgage news
+organized into five categories, rendered in the chat UI and optionally delivered via email
+(Phase 15b). Satisfies customer PoC request for automated market intelligence pipeline.
+
+**Architecture:**
+```
+Chat UI ──► Orchestrator ──► NewsletterAgent ──► Foundry Responses API
+                                                      │
+                                                      ▼
+                                                MCPTool (KB MCP — shared with AdvisorAgent)
+                                                      │
+                                                      ▼
+                                              Azure AI Search
+                                        (news-articles KB source — Phase 14)
+
+mcp-server/newsletter_trigger.py:
+  Timer (Monday 09:00 UTC) ──► NewsletterAgent.run() ──► log output
+  POST /newsletter ──────────► NewsletterAgent.run() ──► JSON response
+```
+
+**Key design decisions:**
+- Reuses `ADVISOR_MCP_CONNECTION` — no new ARM PUT or environment variable needed
+- Same KB (`kb-va-loan-concierge`) serves both Advisor and Newsletter agents — queries
+  the `ks-loan-guidelines` + `ks-va-loan-news-articles` sources simultaneously
+- Agent name: `va-loan-newsletter-iq` (separate Foundry agent from the Advisor)
+- Chat-rendered (Phase 15): digest returned as `partial_response` event with `agent: "newsletter"`
+- Timer trigger: Monday 09:00 UTC for weekly digest; `POST /newsletter` for on-demand
+- No additional env vars — reuses all existing Foundry/KB/model env vars
+
+**Five digest sections (structured markdown output):**
+1. **Market Trends** — rate movements, housing data, Fed activity
+2. **Regulatory & Policy** — CFPB, VA circulars, compliance changes
+3. **Competitor & Industry Moves** — lender news, M&A, originator moves
+4. **Client & Partner News** — MBA, trade associations, service provider updates
+5. **Industry Events** — conferences, advocacy, MBA convention
+
+Each item: `- **[Title]** — summary. *Why it matters:* leadership implication. *(Source: name, date)*`
+
+**Knowledge base expansion (8 new VA topic files uploaded 2026-03-31):**
+| File | Topic |
+|---|---|
+| `va_funding_fee_tables.md` | Complete 2024/2025 fee tables, exemptions, NTB recoupment |
+| `va_entitlement_calculations.md` | Basic/bonus entitlement, residual formula, simultaneous use |
+| `va_minimum_property_requirements.md` | MPRs, safety/soundness, lead paint, termites |
+| `va_appraisal_and_tidewater.md` | NOV, Tidewater Initiative, ROV 2024 changes |
+| `va_coe_and_eligibility_documentation.md` | All 4 COE methods, service documentation |
+| `va_closing_costs_and_allowable_fees.md` | 1% cap, prohibited fees, seller concessions |
+| `va_jumbo_and_renovation_loans.md` | High-balance, down payment formula, EEM, renovation |
+| `va_state_overlays_and_lender_guidelines.md` | Credit overlays, residual income, state rules |
+
+**RSS feed expansion (11 feeds — tools/feed_sources.json):**
+- VA Home Loans, CFPB Newsroom, CFPB Blog, Freddie Mac PMMS, Mortgage News Daily,
+  National Mortgage News, HousingWire, MBA Mortgage News, Census Bureau Housing,
+  NY Fed Liberty Street Economics, Calculated Risk
+
+**New SSE event types (UI renders newsletter flow in Agent Flow Log):**
+| Event | Meaning |
+|---|---|
+| `newsletter_start` | Newsletter Agent activated |
+| `newsletter_tool_call` | Querying knowledge base |
+| `newsletter_tool_result` | Articles retrieved |
+| `newsletter_complete` | Digest ready |
+
+**Orchestrator routing:** Query classified as `needs_newsletter=True` on keywords: `digest`,
+`newsletter`, `market intel`, `market intelligence`, `weekly update`, `weekly report`,
+`market update`, `industry news`, `mortgage news`, `rate news`, `weekly digest`,
+`send me the`, `rate trends`, `policy update`, `competitor`, `industry report`.
+
+**Phase 15b (ACS Email Delivery — planned):**
+Email delivery via Azure Communication Services — add after chat digest verified.
+- New Bicep: `infra/modules/communication-services.bicep`
+- New tool: `tools/newsletter_tool.py` — wraps ACS Email SDK
+- New env vars: `ACS_ENDPOINT`, `NEWSLETTER_SENDER`, `NEWSLETTER_RECIPIENTS`
+- Newsletter timer trigger calls `send_digest()` after agent produces markdown
+
+Items:
+- [x] Create `agents/newsletter_agent.py` — `NewsletterAgent` with 5-section instructions
+- [x] Create `mcp-server/newsletter_trigger.py` — timer (Mon 09:00 UTC) + POST /newsletter
+- [x] Update `mcp-server/function_app.py` — register newsletter_trigger on shared FunctionApp
+- [x] Update `agents/orchestrator_agent.py` — 4-way routing + newsletter execution block
+- [x] Update `tools/feed_sources.json` — expanded from 4 to 11 verified RSS feeds
+- [x] Update `agents/advisor_agent.py` — reference all 10 knowledge files by name
+- [x] Create 8 new knowledge files (va_funding_fee_tables.md, va_entitlement_calculations.md, etc.)
+- [x] Update `.env.example` — Phase 15 section (ACS vars commented as Phase 15b)
+- [x] Update `tests/test_orchestrator.py` — 5-tuple routing (114 tests passing)
+- [x] Upload all 11 knowledge docs to `loan-guidelines` blob container (2026-03-31)
+- [x] Deploy Function App — `newsletter_now` + `newsletter_timer` registered (2026-03-31)
+- [ ] Test: chat query "send me the weekly digest" → digest rendered in UI
+- [ ] Test: POST /newsletter → JSON digest returned
+- [ ] Test: KB indexer re-runs on new blobs (or trigger manually in portal)
+- [ ] Phase 15b: ACS email delivery
+
+---
+
 ### Phase 16. Foundry Memory Stores — Semantic Long-Term Memory — PLANNED
 
 **Goal:** Add cross-conversation memory so the system remembers Veterans across sessions —
@@ -1748,8 +1844,9 @@ Planned (existing, blocked on Phase 9):
       ├── Phase 11 (Auth)          — requires Phase 9 (App Service for Easy Auth)
       └── Phase 12 (Network)       — requires Phase 9 (VNet integration needs App Service)
 
-Planned (independent — can start immediately):
-  Phase 15 (Newsletter Agent) ← new outbound agent, consumes Phase 14 news index
+Completed (independent):
+  Phase 15 (Newsletter Agent) ← chat-rendered digest, consumes Phase 14 news index (2026-03-31)
+      └── Phase 15b (ACS Email Delivery) ← planned next; verify chat digest first
 
 Planned (requires Phase 11):
   Phase 16 (Foundry Memory Stores) ← cross-session Veteran memory (requires auth)
@@ -1760,7 +1857,8 @@ Validated (not a numbered phase):
 
 Dependency graph:
   Phases 14 and 15 are independent of Phases 9–12.
-  Phase 15 depends on Phase 14 (consumes the news search index).
+  Phase 15 depends on Phase 14 (consumes the news blob container via Foundry IQ KB).
+  Phase 15b depends on Phase 15 (email delivery wraps the chat digest).
   Phase 13 complements Phase 9 (Web App MI gets Cosmos RBAC when unblocked).
   Phase 14 extends Phase 3 (Foundry IQ KB gets new content source).
   Phase 16 requires Phase 11 (Auth) — long-term memory needs authenticated user identity.
