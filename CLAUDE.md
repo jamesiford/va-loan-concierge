@@ -1728,9 +1728,21 @@ Items:
 - [x] Update `ui/src/components/FlowEvent.jsx` — 4 new newsletter event types
 - [x] Update `ui/src/components/ChatPanel.jsx` — 5th demo button "Weekly Market Digest"
 - [x] Trigger re-ingest with corrected 11-feed `feed_sources.json` (2026-03-31)
-- [ ] Test: chat query "send me the weekly digest" → digest rendered in UI
+- [x] Fix: strip Foundry `【idx†source】` markers from digest before rendering (2026-03-31)
+- [x] Fix: remove redundant `handoff` event before newsletter block (2026-03-31)
+- [x] Test: chat query "send me the weekly digest" → digest rendered in UI (confirmed 2026-03-31)
 - [ ] Test: KB indexer re-runs on new blobs → Advisor answers from news source with date
 - [ ] Phase 15b: ACS email delivery (see below)
+
+**Newsletter-specific rendering notes:**
+- Foundry Responses API appends raw `【idx†source】` markers even when the agent
+  instructions specify inline `*(Source: name, date)*` citations. `newsletter_agent.py`
+  strips these with `_CITATION_RE.sub("", digest_text)` before yielding `_newsletter_text`.
+  The article count is captured before stripping. Same regex as `advisor_agent.py`.
+- No `handoff` event is emitted before the newsletter block in `orchestrator_agent.py`.
+  Newsletter is always the sole agent in its routing path; the `plan` event already names
+  it in the chat panel. Emitting both produces two back-to-back dividers with identical
+  meaning. This is intentional — don't add the handoff back.
 
 **Phase 15b — ACS Email Delivery (next up):**
 
