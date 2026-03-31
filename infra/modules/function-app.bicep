@@ -11,6 +11,11 @@ param environmentName string
 param location string
 param appInsightsConnectionString string
 param storageAccountName string
+param foundryProjectEndpoint string = ''
+param foundryProjectResourceId string = ''
+param advisorKnowledgeBaseName string = ''
+param advisorSearchEndpoint string = ''
+param advisorMcpConnection string = ''
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
   name: storageAccountName
@@ -71,6 +76,26 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
           value: appInsightsConnectionString
+        }
+        {
+          name: 'FOUNDRY_PROJECT_ENDPOINT'
+          value: foundryProjectEndpoint
+        }
+        {
+          name: 'FOUNDRY_PROJECT_RESOURCE_ID'
+          value: foundryProjectResourceId
+        }
+        {
+          name: 'ADVISOR_KNOWLEDGE_BASE_NAME'
+          value: advisorKnowledgeBaseName
+        }
+        {
+          name: 'ADVISOR_SEARCH_ENDPOINT'
+          value: advisorSearchEndpoint
+        }
+        {
+          name: 'ADVISOR_MCP_CONNECTION'
+          value: advisorMcpConnection
         }
       ]
     }

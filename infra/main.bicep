@@ -153,6 +153,9 @@ module functionApp 'modules/function-app.bicep' = {
     location: location
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     storageAccountName: storage.outputs.storageAccountName
+    foundryProjectEndpoint: aiProject.outputs.projectEndpoint
+    foundryProjectResourceId: aiProject.outputs.projectId
+    advisorSearchEndpoint: search.outputs.searchEndpoint
   }
 }
 

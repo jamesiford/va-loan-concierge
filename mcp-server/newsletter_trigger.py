@@ -25,6 +25,13 @@ Phase 15b (ACS email):  Email delivery via Azure Communication Services will
 be added in a future phase. The trigger will call send_digest() from
 tools/newsletter_tool.py after the agent produces the markdown.
 
+Source of truth:
+  The NewsletterAgent code lives in agents/newsletter_agent.py at the repo root.
+  At deploy time, postprovision.ps1 (or a manual copy) places newsletter_agent.py
+  into mcp-server/ so the Function App can import it directly.
+  *** If you modify agents/newsletter_agent.py, copy it to mcp-server/ before
+      publishing the Function App (or run `azd up`). ***
+
 Environment variables:
   FOUNDRY_PROJECT_ENDPOINT    — Foundry project data-plane endpoint
   FOUNDRY_MODEL_DEPLOYMENT    — e.g. gpt-4.1
@@ -56,21 +63,16 @@ def _run_newsletter(period_days: int = 7) -> dict:
 
     The agent's run() method is an async generator. We collect all events,
     extract the _newsletter_text payload, and return a summary dict.
-    """
-    # Import here to avoid circular imports at module load time.
-    # The agents/ directory is in the Python path via function_app.py's sys.path setup.
-    import sys
-    import os as _os
-    # Ensure the repo root is on sys.path so we can import agents/
-    repo_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-    if repo_root not in sys.path:
-        sys.path.insert(0, repo_root)
 
-    from agents.newsletter_agent import NewsletterAgent
+    newsletter_agent.py is copied into mcp-server/ at deploy time so the
+    Function App can import it without a parent-directory path hack.
+    Source of truth: agents/newsletter_agent.py at the repo root.
+    """
+    from newsletter_agent import NewsletterAgent
 
     async def _collect() -> dict:
         agent = NewsletterAgent()
-        await agent.initialize()
+        await agent.resolve_version()  # look up existing version; fails if backend hasn't run yet
         digest_text = ""
         article_count = 0
         async for event in agent.run(period_days=period_days):

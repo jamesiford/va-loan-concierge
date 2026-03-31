@@ -396,6 +396,23 @@ if ($FUNC_APP_NAME -and $AZURE_RESOURCE_GROUP) {
         "" | Out-File "mcp-server/tools/__init__.py" -Encoding utf8
     }
 
+    Write-Host "  Syncing agents/newsletter_agent.py → mcp-server/"
+    Copy-Item "agents/newsletter_agent.py" "mcp-server/newsletter_agent.py" -Force
+
+    # Set app settings that are not wired via Bicep (hook-managed values).
+    # FOUNDRY_PROJECT_ENDPOINT, FOUNDRY_PROJECT_RESOURCE_ID, and ADVISOR_SEARCH_ENDPOINT
+    # are set by Bicep. ADVISOR_KNOWLEDGE_BASE_NAME and ADVISOR_MCP_CONNECTION are
+    # fixed strings owned by this hook — set them here so the newsletter trigger can
+    # call resolve_version() without missing env vars.
+    Write-Host "  Setting newsletter env vars on Function App..."
+    az functionapp config appsettings set `
+        --name $FUNC_APP_NAME `
+        --resource-group $AZURE_RESOURCE_GROUP `
+        --settings `
+            "ADVISOR_KNOWLEDGE_BASE_NAME=$KB_NAME" `
+            "ADVISOR_MCP_CONNECTION=$ADVISOR_MCP_CONNECTION" `
+        --output none
+
     Push-Location mcp-server
     func azure functionapp publish $FUNC_APP_NAME --python
     Pop-Location

@@ -8,3 +8,7 @@ azure-ai-contentunderstanding>=1.0.1
 azure-storage-blob>=12.25.0
 azure-identity>=1.25.0
 feedparser>=6.0.0
+
+# Newsletter Agent (Phase 15) — NewsletterAgent uses the Foundry Responses API
+azure-ai-projects>=2.0.1
+aiohttp>=3.9.0
