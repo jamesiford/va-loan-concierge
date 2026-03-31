@@ -1058,7 +1058,7 @@ This resolved vector search failures on the portal-created chunked index (`ks-va
 | Teams search (admin tenant) | Agent not found | Not installed as Teams app, only published to M365 Copilot |
 | Teams sideload (fordjames tenant) | Bot works, sign-in works, RBAC error | fordjames needs Azure AI User role on admin tenant's Foundry project; admin tenant blocks guest invitations |
 | Teams sideload (admin sign-in) | OAuth 500 error | Foundry `agent-oauth` service returns 500 on cross-tenant OAuth redirect |
-| Copilot Studio (fordjames tenant) | Connector blocked | Power Platform DLP policy "Personal Developer (default)" blocks Azure AI Foundry Agent Service connector |
+| Copilot Studio (fordjames tenant) | Connector blocked | Power Platform DLP policy "Personal Developer (default)" blocks Microsoft Foundry Agent Service connector |
 | Change Bot Type to MultiTenant | Cannot change | ServiceIdentity type — setting greyed out in portal |
 | Enable guest invitations (admin tenant) | Cannot change | Entra External Collaboration settings locked (managed sandbox tenant) |
 

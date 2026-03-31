@@ -1,10 +1,45 @@
 # VA Loan Concierge
 
-A multi-agent demo for a VA mortgage lender built on **Microsoft Azure AI Foundry**. The application showcases three distinct Foundry capabilities — **Foundry IQ** (grounded knowledge-base RAG), **MCP** (live tool invocation via a custom Azure Function), and **Work IQ Calendar** (Microsoft-hosted MCP for M365 calendar management) — working together in a coordinated agent workflow.
+A multi-agent demo for a VA mortgage lender built on **Microsoft Foundry**. The application showcases three distinct Foundry capabilities — **Foundry IQ** (grounded knowledge-base RAG), **MCP** (live tool invocation via a custom Azure Function), and **Work IQ Calendar** (Microsoft-hosted MCP for M365 calendar management) — working together in a coordinated agent workflow.
 
 Two orchestration paths share the same sub-agents:
 - **React UI demo** — Python backend with real-time SSE streaming and an Agent Flow Log
 - **Copilot Studio / Teams** — Foundry Workflow Agent (declarative YAML, no container needed)
+
+---
+
+## Table of Contents
+
+- [What It Does](#what-it-does)
+- [Architecture](#architecture)
+  - [Agent Roles](#agent-roles)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Provision Infrastructure](#provision-infrastructure-azd-up)
+  - [Manual Step 1: Create Foundry IQ Knowledge Base](#manual-step-1-create-foundry-iq-knowledge-base)
+  - [Manual Step 2: Add News Articles Knowledge Source](#manual-step-2-add-news-articles-as-second-knowledge-source-phase-14)
+  - [Manual Step 3: Configure Work IQ Calendar](#manual-step-3-configure-work-iq-calendar-optional)
+  - [Manual Step 4: Assign Guardrails](#manual-step-4-assign-guardrails-to-agents-recommended)
+  - [Run the Demo](#run-the-demo)
+  - [Troubleshooting: Storage Account and Cosmos DB Network Access](#troubleshooting-storage-account-and-cosmos-db-network-access)
+  - [Troubleshooting: Cosmos DB Region Capacity](#troubleshooting-cosmos-db-region-capacity)
+  - [Tear Down](#tear-down)
+- [CLI-Only Mode](#alternative-cli-only-mode)
+- [Running Tests](#running-tests)
+- [Running Evaluations](#running-evaluations)
+- [Project Structure](#project-structure)
+- [Key Features](#key-features)
+  - [Foundry IQ — Grounded Knowledge Base](#foundry-iq--grounded-knowledge-base-advisor-agent)
+  - [Custom MCP Server — Live Tool Invocation](#custom-mcp-server--live-tool-invocation-calculator--scheduler)
+  - [Human-in-the-Loop — Multi-Turn Conversations](#human-in-the-loop--multi-turn-conversations)
+  - [Memory Architecture — Two Layers](#memory-architecture--two-layers)
+  - [Content Understanding — VA Mortgage News Pipeline](#content-understanding--va-mortgage-news-pipeline-phase-14)
+  - [Work IQ Calendar — M365 Integration](#work-iq-calendar--m365-integration-calendar-agent)
+  - [Demo Borrower Profiles](#demo-borrower-profiles)
+- [Tech Stack](#tech-stack)
+- [What This Demo Proves](#what-this-demo-proves)
+- [Roadmap](#roadmap)
+- [Teams / M365 Copilot Publishing](#teams--m365-copilot-publishing)
 
 ---
 
@@ -176,7 +211,7 @@ After provisioning completes, `azd up` automatically:
 
 The Advisor Agent requires a Foundry IQ Knowledge Base backed by the blob storage containers that `azd up` populates. This must be created manually in the Foundry portal because the SDK for programmatic KB creation is in preview and unreliable.
 
-1. Open the [Azure AI Foundry portal](https://ai.azure.com) → your project (`proj-{env}`)
+1. Open the [Microsoft Foundry portal](https://ai.azure.com) → your project (`proj-{env}`)
 2. Go to **Knowledge** (left sidebar) → **+ New knowledge base**
 3. Fill in the knowledge base details:
 
@@ -221,7 +256,7 @@ ADVISOR_KNOWLEDGE_BASE_NAME=kb-va-loan-concierge
 
 After `azd up`, the news ingestion pipeline is running and the `news-articles` blob container has been created. To make the Advisor Agent aware of live VA mortgage news, add this container as a second knowledge source in the same Knowledge Base.
 
-1. Open the [Azure AI Foundry portal](https://ai.azure.com) → your project → **Knowledge**
+1. Open the [Microsoft Foundry portal](https://ai.azure.com) → your project → **Knowledge**
 2. Select your knowledge base (`kb-va-loan-concierge`)
 3. Under **Knowledge sources**, click **+ Add source** → **Azure Blob Storage**:
 
