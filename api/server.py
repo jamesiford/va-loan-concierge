@@ -246,6 +246,57 @@ def _sse_headers() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Newsletter / Market Intelligence endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/newsletter")
+async def newsletter_stream():
+    """
+    Trigger a newsletter digest run and stream results as SSE.
+    Sends the weekly digest query through the orchestrator and streams
+    newsletter_start / newsletter_tool_call / newsletter_tool_result /
+    _newsletter_text / newsletter_complete events.
+    """
+    orchestrator: Orchestrator | None = getattr(app.state, "orchestrator", None)
+
+    if orchestrator is None:
+        async def init_error():
+            yield _sse_frame({"type": "error", "message": "Orchestrator not initialized."})
+        return StreamingResponse(init_error(), media_type="text/event-stream", headers=_sse_headers())
+
+    async def event_stream():
+        try:
+            async for event in orchestrator.run(
+                "Generate the weekly market intelligence digest",
+                profile_id=None,
+                conversation_id=None,
+            ):
+                yield _sse_frame(event)
+        except Exception as exc:
+            logger.exception("server: newsletter stream error")
+            yield _sse_frame({"type": "error", "message": str(exc)})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=_sse_headers())
+
+
+@app.get("/api/signals/config")
+async def signals_config():
+    """
+    Returns the static demo client configuration for the Market Intelligence UI.
+    In a production system this would be read from a database.
+    """
+    return {
+        "client": "Experian",
+        "sector": "credit-bureau",
+        "digest_day": "Monday",
+        "watchlist": ["Equifax", "TransUnion", "FICO", "Moodys", "Dun & Bradstreet"],
+        "competitors": ["Equifax", "TransUnion"],
+        "topics": ["regulatory", "ai-lending", "data-privacy", "credit-scoring", "consumer-credit", "CFPB"],
+        "distribution": ["chris.shanku@ilink-systems.com"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Static files — serve React production build (Phase 5)
 # ---------------------------------------------------------------------------
 # Must be AFTER all API route definitions so /api/* routes take priority.

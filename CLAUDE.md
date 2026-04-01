@@ -759,6 +759,14 @@ best practices — `agent_reference` + Responses API is the canonical pattern. C
 are intentionally not used. See Phase 5 rationale.
 Teams publishing investigated 2026-03-26 — blocked by cross-tenant limitations.
 
+**Spinoff repo (2026-03-31):** The newsletter/digest UI and CU ingestion pipeline were
+extracted into a standalone repo: `market-intelligence-digest`
+(GitHub: `https://github.com/jamesiford/market-intelligence-digest`,
+local: `c:\Projects\GitHub\market-intelligence-digest`).
+The `ui-signalscope/` directory in this repo is a dev snapshot — all active development
+on the digest UI continues in the new repo. The `feature/signalscope-ui` branch was
+deleted (local only, never pushed). Do not add VA loan chatbot patterns to the new repo.
+
 ---
 
 ### Phase 7. Guardrails & Content Safety — ✅ COMPLETE
