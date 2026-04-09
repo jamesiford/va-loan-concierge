@@ -218,6 +218,7 @@ class Orchestrator:
     """
 
     def __init__(self) -> None:
+        self._credential: DefaultAzureCredential | None = None
         self._client: AIProjectClient | None = None
         self._advisor: AdvisorAgent | None = None
         self._calculator: CalculatorAgent | None = None
@@ -230,9 +231,10 @@ class Orchestrator:
 
     def _get_client(self) -> AIProjectClient:
         if self._client is None:
+            self._credential = DefaultAzureCredential()
             self._client = AIProjectClient(
                 endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
-                credential=DefaultAzureCredential(),
+                credential=self._credential,
             )
         return self._client
 
@@ -1028,4 +1030,7 @@ class Orchestrator:
         if self._client:
             await self._client.close()
             self._client = None
+        if self._credential:
+            await self._credential.close()
+            self._credential = None
         logger.info("orchestrator: closed")

@@ -86,6 +86,7 @@ class CalendarAgent:
     """
 
     def __init__(self) -> None:
+        self._credential: DefaultAzureCredential | None = None
         self._client: AIProjectClient | None = None
         self._agent_version: str | None = None
 
@@ -100,9 +101,10 @@ class CalendarAgent:
 
     def _get_client(self) -> AIProjectClient:
         if self._client is None:
+            self._credential = DefaultAzureCredential()
             self._client = AIProjectClient(
                 endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
-                credential=DefaultAzureCredential(),
+                credential=self._credential,
             )
         return self._client
 
@@ -258,3 +260,6 @@ class CalendarAgent:
         if self._client is not None:
             await self._client.close()
             self._client = None
+        if self._credential is not None:
+            await self._credential.close()
+            self._credential = None

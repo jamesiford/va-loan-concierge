@@ -651,8 +651,6 @@ curl -X POST https://func-{env}.azurewebsites.net/newsletter
 
 **Architecture note:** The Function App's `newsletter_trigger.py` calls `resolve_version()` instead of `initialize()` — it looks up the latest existing Foundry agent version rather than creating a new one. The Python backend (`api/server.py`) is the sole owner of agent registration. If the backend has never been started, the Function App will raise a clear error rather than silently creating a divergent agent version.
 
-**Spinoff repo:** The newsletter digest UI and CU ingestion pipeline have been extracted into a standalone, client-agnostic product: [`market-intelligence-digest`](https://github.com/jamesiford/market-intelligence-digest). That repo supports multiple client profiles (VA mortgage, Experian credit, etc.) and removes the VA loan chatbot complexity. Active digest UI development continues there; `ui-signalscope/` in this repo is a dev snapshot.
-
 ### Work IQ Calendar — M365 Integration (Calendar Agent)
 
 After the Scheduler confirms an appointment and the user confirms, the Calendar Agent calls `CreateEvent` on the **Work IQ Calendar MCP server** to place it on the Veteran's M365 calendar.

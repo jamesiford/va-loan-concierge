@@ -7,6 +7,8 @@ Covers:
   - initialize() agent creation and reuse; ARM connection provisioning
 """
 
+import os
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from azure.core.exceptions import ResourceNotFoundError
@@ -186,7 +188,9 @@ class TestAdvisorAgentInitialize:
         mcp_tool = next(
             t for t in call_kwargs["definition"].tools if isinstance(t, MCPTool)
         )
-        assert "kb-va-loan-test" in mcp_tool.server_url
+        # The URL should contain the KB name from the environment
+        kb_name = os.environ.get("ADVISOR_KNOWLEDGE_BASE_NAME", "kb-va-loan-test")
+        assert kb_name in mcp_tool.server_url
         assert mcp_tool.allowed_tools == ["knowledge_base_retrieve"]
         assert mcp_tool.require_approval == "never"
 

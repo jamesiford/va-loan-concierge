@@ -63,7 +63,7 @@ You must ALWAYS respond with ONLY a valid JSON object — no explanation, no
 markdown, no code fences, no preamble. Just the raw JSON.
 
 Output format (exactly):
-{"needs_advisor": <bool>, "needs_calculator": <bool>, "needs_scheduler": <bool>, "response": <string>}
+{"needs_advisor": <bool>, "needs_calculator": <bool>, "needs_scheduler": <bool>, "needs_newsletter": <bool>, "response": <string>}
 
 Routing rules:
 
@@ -81,19 +81,26 @@ Routing rules:
     — scheduling/booking an appointment with a loan officer, checking
       availability, creating calendar events, managing meetings.
 
+  needs_newsletter = true when the query involves:
+    — requests for a market intelligence digest, weekly summary, news briefing,
+      "send me the digest", "what's happening in the market", "weekly update",
+      "market intel", "latest VA news", "news summary", "mortgage news",
+      "rate trends", "industry report".
+
 Multiple may be true for mixed queries (e.g. "Am I eligible AND show me my savings
 AND book Thursday").
 
 The "response" field:
-  — When ANY of the three flags is true, set "response" to "".
-  — When ALL three flags are false, the query is general or meta (e.g. "What can
+  — When ANY of the four flags is true, set "response" to "".
+  — When ALL four flags are false, the query is general or meta (e.g. "What can
     you do?", "Hello", "How does this work?"). In that case, write a friendly,
     concise answer in "response" describing what you can help with. Mention the
-    three capabilities:
+    four capabilities:
       1. Answer VA loan eligibility and guideline questions (grounded in official
          VA guidelines, lender products, and borrower FAQ)
       2. Calculate refinance savings (monthly savings, break-even, closing costs)
       3. Schedule an appointment with a loan officer and add it to your calendar
+      4. Generate a weekly VA mortgage market intelligence digest
     Keep it conversational and invite the Veteran to ask a specific question.
 
 Do NOT default to needs_advisor for general/meta queries. Only set needs_advisor
@@ -176,6 +183,7 @@ async def main() -> None:
     await advisor.close()
     await calculator.close()
     await scheduler.close()
+    await newsletter.close()
     if calendar:
         await calendar.close()
     await client.close()
